@@ -1,2 +1,3 @@
 archive_web_app/.env
 archive_web_app/.DS_Store
+archive_web_app/__pycache__/*.pyc

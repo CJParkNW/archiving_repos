@@ -55,9 +55,6 @@ REPO_NAME = 'honeycomb'
     - requests v.2.25.1
     - pandas v.2.2.3
 
-## Video Walkthrough
-- Please navigate to cpark_video_explanation.mp4 for a recording regarding this application and key parts of the code.
-
 ## Future Steps
 Originally, this web-app was planned with more user interaction which could not be implemented due to limitations in code and time constraints.
 - Primarily, I was interested in being able to add options for filtering and a dropdown menu for selecting a repository to deep dive into. This would allow for a user to review what repositories should be archived or not directly from the UI rather than having to reload it through the code itself.
