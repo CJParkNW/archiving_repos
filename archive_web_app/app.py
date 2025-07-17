@@ -25,8 +25,8 @@ HEADERS = {
 
 # Setting the organization and repo to deep dive into
 # Change the input here if you would like to investigate other orgs
-ORG_NAME = 'brown-ccv'
-REPO_NAME = 'pulsedetector'
+ORG_NAME = 'plotly'
+REPO_NAME = 'plotly.py'
 
 # Temporary message for terminal -- To show that the UI is loading.
 print("Loading...Please Wait...")
@@ -46,8 +46,10 @@ fig_6 = c_viz.request_data_participation(ORG_NAME, REPO_NAME, HEADERS)
 # Extract out the top 10 repositories that can be archived (to display on UI)
 sample_top_10_repos_to_archive = df_repos[['name', 'description',
                                            'last_push_time',
-                                           'overall_score']].sort_values('overall_score',
-                                                                         ascending=False).head(10)
+                                           'overall_score']][df_repos['is_archived'] == False].sort_values('overall_score',
+                                                                                                             ascending = False).head(10)
+
+
 # Take the dataframe for the top 10 repositories and create an interactive table
 top_table_archive = dbc.Table.from_dataframe(sample_top_10_repos_to_archive,
                                              striped=True, bordered=True,
