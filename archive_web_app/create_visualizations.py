@@ -204,7 +204,8 @@ def plot_all_code_frequency(organization_name: str, repo_name: str,
                             headers_input: dict):
     """
     Create a line graph representing the total additions/deletions over the time
-    that a repository has been worked on.
+    that a repository has been worked on. Returns an empty figure with a message
+    if the data cannot be retrieved within the retry limit.
 
     Args:
         organization_name: Organization that is looked at in the API endpoint
@@ -214,85 +215,64 @@ def plot_all_code_frequency(organization_name: str, repo_name: str,
         fig: plotly.express figure - Line graph that represents the changes
         over time in a repository.
     """
-    # Call recursively until the cached data from this endpoint is properly
-    # filling out the dataframe
-    request_data_code_frequency(organization_name, repo_name, headers_input)
-    # Once the function returns, this will indicate that the endpoint is ready
-    # to be pulled on the repository.
-    # Pull endpoint one more time to ensure data is properly extracted
-    r = requests.get(f'https://api.github.com/repos/{organization_name}/{repo_name}/stats/code_frequency',
-                     headers=headers_input,
-                     timeout=MAX_TIMEOUT)
+    _EMPTY_TITLE = "Commit history unavailable for this repository"
+
+    data_ready = _wait_for_code_frequency(
+        organization_name, repo_name, headers_input
+    )
+    if not data_ready:
+        return px.line(title=_EMPTY_TITLE, width=800, height=600)
+
+    r = requests.get(
+        f'https://api.github.com/repos/{organization_name}'
+        f'/{repo_name}/stats/code_frequency',
+        headers=headers_input,
+        timeout=MAX_TIMEOUT,
+    )
     output_file = r.json()
 
-    # Create a dataframe containing the commit history (additions/deletions)
-    # over a repository's entire history.
-    df_repo_commit_history = pd.DataFrame(columns=['week_epoch',
-                                                   'converted_time',
-                                                   'additions', 'deletions'])
+    if not isinstance(output_file, list) or not output_file:
+        return px.line(title=_EMPTY_TITLE, width=800, height=600)
 
-    # Iterate through the entire endpoint output and extract out the total
-    # changes by time stamp.
-    for i in enumerate(output_file):
-        index = i[0]
-        # Time is originally in epoch which is converted to a readable timestamp
-        week_time_in_epoch = output_file[index][0]
-        timestamp = pd.to_datetime(week_time_in_epoch, unit='s')
-        num_of_additions = output_file[index][1]
-        num_of_deletions = output_file[index][2]
-        # Fill up the dataframe for plotting
-        df_repo_commit_history.loc[len(df_repo_commit_history)] = [week_time_in_epoch,
-                                                                   timestamp,
-                                                                   num_of_additions,
-                                                                   num_of_deletions]
+    df_repo_commit_history = pd.DataFrame(
+        [[row[0], pd.to_datetime(row[0], unit='s'), row[1], row[2]]
+         for row in output_file],
+        columns=['week_epoch', 'converted_time', 'additions', 'deletions'],
+    )
 
-    # Set up and create a line graph representing the changes made (commits) to
-    # a repository since creation.
-    fig = px.line(df_repo_commit_history, x="converted_time", y="additions",
-                  # Source: https://plotly.com/python/dot-plots/
-                  title="History of all Additions Pushed to the Repository",
-                  color_discrete_sequence=[px.colors.qualitative.Prism[3]],
-                  labels={'additions': 'Total Additions from Commits',
-                          'converted_time': 'Time'},
-                  width=800,
-                  height=600)
-
-    return fig
-    # Source: https://docs.github.com/en/rest/metrics/statistics?apiVersion=2022-11-28#get-the-weekly-commit-activity
+    return px.line(
+        df_repo_commit_history,
+        x="converted_time",
+        y="additions",
+        title="History of all Additions Pushed to the Repository",
+        color_discrete_sequence=[px.colors.qualitative.Prism[3]],
+        labels={'additions': 'Total Additions from Commits',
+                'converted_time': 'Time'},
+        width=800,
+        height=600,
+    )
 
 
-def request_data_code_frequency(organization_name: str, repo_name: str,
-                                headers_input: dict):
+def _wait_for_code_frequency(organization_name: str, repo_name: str,
+                              headers_input: dict,
+                              max_retries: int = 5) -> bool:
     """
-    FOR INTERNAL USE ONLY (For plot_all_code_frequency()). Used to keep checking
-    an API endpoint for the entire data since this endpoint takes longer
-    than other data to load. Continues to iterate through until data is
-    available or if the timeout is surpassed (whichever comes first).
-    # Source: https://docs.github.com/en/rest/metrics/statistics?apiVersion=2022-11-28#best-practices-for-caching
+    Poll the code_frequency stats endpoint until data is ready or retries
+    are exhausted. Returns True if data is available, False otherwise.
 
-    Args:
-        organization_name: Organization that is looked at in the API endpoint
-        repository_name: Repo that is looked at in the API endpoint
-
-    Returns:
-        None - Exit function once data begins to load in order for the
-        plot_all_code_frequency() to be able to properly create the line graph.
+    GitHub returns an empty body (202) while computing stats; we retry up to
+    max_retries times with a 10-second gap between each attempt.
     """
-    # Call API endpoint to check if the cached data is ready to pull
-    r = requests.get(f'https://api.github.com/repos/{organization_name}/{repo_name}/stats/code_frequency',
-                     headers=headers_input,
-                     timeout=MAX_TIMEOUT)
-    # Convert to JSON to check on file
-    file = r.json()
-
-    # If there is no data/file is empty
-    if not file:
-        # Wait 10 seconds before running a pull to the endpoint again.
-        sleep(10)
-        request_data_code_frequency(organization_name, repo_name, headers_input)
-    # If data has been successfully detected, exit this function
-    else:
-        return
+    url = (
+        f'https://api.github.com/repos/{organization_name}'
+        f'/{repo_name}/stats/code_frequency'
+    )
+    for _ in range(max_retries):
+        r = requests.get(url, headers=headers_input, timeout=MAX_TIMEOUT)
+        if isinstance(r.json(), list) and r.json():
+            return True
+        sleep(5)
+    return False
 
 
 def request_data_participation(organization_name: str, repo_name: str,

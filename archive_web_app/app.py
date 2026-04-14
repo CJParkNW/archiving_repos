@@ -7,9 +7,11 @@ organization.
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from dash import Dash, html, Output, Input, State, dcc, callback_context, dash_table
+from dash import (Dash, html, Output, Input, State, dcc,
+                  callback_context, dash_table, no_update)
 import dash_bootstrap_components as dbc
 from PIL import Image
 import create_visualizations as c_viz
@@ -50,7 +52,8 @@ if df_repos.empty:
 github_logo_path = Image.open("images/github-mark.png")
 
 # Initialize the app with external theme
-app = Dash(external_stylesheets=[dbc.themes.UNITED])
+app = Dash(external_stylesheets=[dbc.themes.UNITED],
+           suppress_callback_exceptions=True)
 
 # Building components on Web App/Dashboard
 # The standard style arguments for the sidebar.
@@ -75,25 +78,47 @@ CONTENT_STYLE = {
 
 # Build the structure of the side bar.
 sidebar = html.Div(
-    [html.H2("Archiving GitHub Repos", className="display-4"),
-     html.Hr(),
-     html.P("""Determine what repos should be archived with a
-            few simple visualizations and metrics!"""),
-        # Create different navigation tabs to display different data.
+    [
+        html.H2("Archiving GitHub Repos", className="display-4"),
+        html.Hr(),
+        html.P("Determine what repos should be archived with a "
+               "few simple visualizations and metrics!"),
         dbc.Nav(
             [dbc.NavLink("Overview", href="/", active="exact"),
              dbc.NavLink("Repo Deep Dive", href="/deep-dive", active="exact"),
              dbc.NavLink("About this Tool", href="/about", active="exact")],
             vertical=True,
-            pills=True),  # dbc.Nav()
-     ],  # html.Div([])
+            pills=True,
+        ),
+        html.Hr(),
+        html.P("Organization", style={"fontWeight": "bold",
+                                      "marginBottom": "0.3rem"}),
+        dcc.Input(
+            id="org-input",
+            type="text",
+            value=ORG_NAME,
+            placeholder="e.g. plotly",
+            debounce=False,
+            style={"width": "100%", "marginBottom": "0.5rem",
+                   "borderRadius": "4px", "border": "none",
+                   "padding": "6px 8px"},
+        ),
+        dbc.Button("Load Org", id="load-org-btn", color="light",
+                   size="sm", className="w-100"),
+        dcc.Loading(
+            html.Div(id="org-load-status",
+                     style={"marginTop": "0.4rem", "fontSize": "0.8rem"}),
+            type="circle",
+            color="white",
+        ),
+    ],
     style=SIDEBAR_STYLE,
-    )  # html.Div()
+)
 
 content = html.Div(id="page-content", style=CONTENT_STYLE)
 app.layout = html.Div([
     dcc.Location(id="url"),
-    dcc.Store(id="repos-store"),  # holds refreshed df as JSON
+    dcc.Store(id="org-store", data=ORG_NAME),
     sidebar,
     content
 ])
@@ -164,7 +189,7 @@ def build_freshness_bar(org: str):
     )
 
 
-def build_overview(df):
+def build_overview(df, org: str):
     """Build the overview page content from a dataframe."""
     fig_1 = c_viz.create_chart_per_language(df)
     fig_2 = c_viz.create_chart_top_repos_w_issues(df)
@@ -243,11 +268,11 @@ def build_overview(df):
         dbc.Row(
             [
                 dbc.Col(
-                    html.H2(f"Overview — {ORG_NAME}", className="mb-0"),
+                    html.H2(f"Overview — {org}", className="mb-0"),
                     width=True,
                 ),
                 dbc.Col(
-                    build_freshness_bar(ORG_NAME),
+                    build_freshness_bar(org),
                     width="auto",
                 ),
             ],
@@ -262,7 +287,7 @@ def build_overview(df):
         html.P(),
         dbc.Row([dbc.Col(repo_table)]),
         html.Hr(),
-        html.H4(f"Visualizations — {ORG_NAME}", className="mb-3"),
+        html.H4(f"Visualizations — {org}", className="mb-3"),
         dbc.Row([
             dbc.Col(dcc.Graph(figure=fig_score), width="auto"),
             dbc.Col(dcc.Graph(figure=fig_1), width="auto"),
@@ -276,40 +301,47 @@ def build_overview(df):
 
 # Creates the structure for the deep dive repo page
 def build_deep_dive(df):
-    """Build the deep dive page content from a dataframe."""
-    fig_5 = c_viz.plot_all_code_frequency(ORG_NAME, REPO_NAME, HEADERS)
-    fig_6 = c_viz.request_data_participation(ORG_NAME, REPO_NAME, HEADERS)
-    row_repo = df.loc[df['name'] == REPO_NAME].reset_index()
+    """
+    Render the Deep Dive page layout instantly — just the header and dropdown.
+    Charts are loaded asynchronously by the update_deep_dive_content callback.
+    """
+    candidates = (
+        df[~df['is_archived'].astype(bool)]
+        .sort_values('overall_score', ascending=False)
+    )
+    if candidates.empty:
+        return dbc.Container([
+            html.H4("No repos found for this organization."),
+        ], fluid=True)
+
+    options = [
+        {"label": f"{r['name']}  (score: {r['overall_score']})",
+         "value": r['name']}
+        for _, r in candidates.iterrows()
+    ]
+    default_repo = options[0]["value"]
 
     return dbc.Container([
         dbc.Row(
-            dbc.Col(html.H2(f"Deep Dive — {REPO_NAME}", className="mb-0")),
+            dbc.Col(html.H2("Repo Deep Dive", className="mb-0")),
             className="py-3 border-bottom mb-3",
         ),
-        html.P(f"Description: {row_repo['description'][0]}"),
-        html.P("""When determining what criteria should be used for understanding
-               whether a repository should be archived or not, there is a key
-               component to understand."""),
-        html.P("""Even if a repository has not been updated recently,
-               it is important to ensure that any open issues or pull requests
-               are closed. Otherwise, you run the risk of leaving these issues
-               and pull requests in collaborator's accounts forever (with no way
-               to edit them unless if the repo is unarchived again). Commits or
-               changes made in the past year may be a huge determining factor for
-               whether a repository should be archived, but other metrics are
-               essential to review as well. While the history of a repository's
-               changes may tell us a lot, it is not the only part of the story."""),
-        html.Hr(),
         dbc.Row([
-            dbc.Col(dcc.Graph(figure=fig_5), width="auto"),
-            dbc.Col(dcc.Graph(figure=fig_6), width="auto"),
-        ]),
-        html.Hr(),
-        html.P([
-            "View on GitHub: ",
-            html.A(row_repo['url'][0], href=row_repo['url'][0],
-                   target="_blank"),
-        ]),
+            dbc.Col(
+                dcc.Dropdown(
+                    id="repo-dropdown",
+                    options=options,
+                    value=default_repo,
+                    clearable=False,
+                    style={"color": "#333"},
+                ),
+            ),
+        ], className="mb-3"),
+        dcc.Loading(
+            html.Div(id="deep-dive-content"),
+            type="circle",
+            color="#782c54",
+        ),
     ], fluid=True)
 
 
@@ -345,15 +377,37 @@ about_content = (
 )
 
 
-@app.callback(Output("page-content", "children"), [Input("url", "pathname")])
-def render_page_content(pathname):
+@app.callback(
+    Output("org-store", "data"),
+    Output("org-load-status", "children"),
+    Input("load-org-btn", "n_clicks"),
+    State("org-input", "value"),
+    prevent_initial_call=True,
+)
+def load_org(_n_clicks, org_input):
+    """Fetch data for a new org and update the store."""
+    if not org_input or not org_input.strip():
+        return no_update, html.Span("Please enter an org name.",
+                                    style={"color": "yellow"})
+    org = org_input.strip()
+    if db.read_repos(org).empty:
+        pipeline.run(org)
+    return org, html.Span(f"Loaded: {org}", style={"color": "#90ee90"})
+
+
+@app.callback(
+    Output("page-content", "children"),
+    Input("url", "pathname"),
+    Input("org-store", "data"),
+)
+def render_page_content(pathname, org):
     """Provides interactive functionality to the navigation tabs."""
-    current_df = db.read_repos(ORG_NAME)
+    current_df = db.read_repos(org)
     if current_df.empty:
         current_df = df_repos  # fall back to startup data
 
     if pathname == "/":
-        return build_overview(current_df)
+        return build_overview(current_df, org)
     elif pathname == "/deep-dive":
         return build_deep_dive(current_df)
     elif pathname == "/about":
@@ -361,16 +415,61 @@ def render_page_content(pathname):
 
 
 @app.callback(
+    Output("deep-dive-content", "children"),
+    Input("repo-dropdown", "value"),
+    State("org-store", "data"),
+)
+def update_deep_dive_content(repo_name, org):
+    """Fetch and render charts for the selected repo."""
+    if not repo_name or not org:
+        return html.P("Select a repository above to see details.")
+
+    df = db.read_repos(org)
+    row_repo = df[df['name'] == repo_name].reset_index()
+    if row_repo.empty:
+        return html.P(f"Repository '{repo_name}' not found.")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_5 = executor.submit(
+            c_viz.plot_all_code_frequency, org, repo_name, HEADERS
+        )
+        future_6 = executor.submit(
+            c_viz.request_data_participation, org, repo_name, HEADERS
+        )
+        fig_5 = future_5.result()
+        fig_6 = future_6.result()
+
+    return [
+        html.P(f"Description: {row_repo['description'][0]}"),
+        html.P("""Even if a repository has not been updated recently,
+               it is important to ensure that any open issues or pull requests
+               are closed before archiving."""),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_5), width="auto"),
+            dbc.Col(dcc.Graph(figure=fig_6), width="auto"),
+        ]),
+        html.Hr(),
+        html.P([
+            "View on GitHub: ",
+            html.A(row_repo['url'][0], href=row_repo['url'][0],
+                   target="_blank"),
+        ]),
+    ]
+
+
+@app.callback(
     Output("refresh-status", "children"),
     Input("refresh-btn", "n_clicks"),
+    State("org-store", "data"),
     prevent_initial_call=True,
 )
-def refresh_data(n_clicks):
+def refresh_data(n_clicks, org):
     """Re-run the pipeline and refresh the database when the button is clicked."""
     if not n_clicks:
         return ""
     start = time.time()
-    pipeline.run(ORG_NAME)
+    pipeline.run(org)
     elapsed = int(time.time() - start)
     m, s = divmod(elapsed, 60)
     elapsed_text = f"{m}m {s}s" if m else f"{s}s"
@@ -383,11 +482,12 @@ def refresh_data(n_clicks):
 @app.callback(
     Output("download-dataframe-csv", "data"),
     Input("btn_csv", "n_clicks"),
+    State("org-store", "data"),
     prevent_initial_call=True,
 )
-def download_csv(n_clicks):
+def download_csv(n_clicks, org):
     """Allow the user to download the full dataset as a CSV."""
-    current_df = db.read_repos(ORG_NAME)
+    current_df = db.read_repos(org)
     return dcc.send_data_frame(current_df.to_csv, "export_repos_archive_data.csv")
 
 
