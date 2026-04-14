@@ -5,7 +5,7 @@ Handles schema creation, writes from the pipeline, and reads for the web app.
 
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -59,23 +59,26 @@ def write_repos(org: str, df: pd.DataFrame):
 
     Args:
         org: GitHub organization name
-        df:  Pandas DataFrame produced by transform_data.create_entire_repo_dataframe()
+        df:  Pandas DataFrame produced by
+             transform_data.create_entire_repo_dataframe()
 
     Raises:
         ValueError: if df is missing required columns
         Exception:  re-raises any DB error after rolling back
     """
+    if df.empty:
+        logger.warning(
+            "write_repos called with empty DataFrame for org '%s'", org
+        )
+        return
+
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
         raise ValueError(
             f"DataFrame is missing required columns: {missing}"
         )
 
-    if df.empty:
-        logger.warning("write_repos called with empty DataFrame for org '%s'", org)
-        return
-
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn = get_connection()
     try:
         for _, row in df.iterrows():
@@ -132,7 +135,9 @@ def read_repos(org: str) -> pd.DataFrame:
     """
     try:
         conn = get_connection()
-        cursor = conn.execute("SELECT * FROM repos WHERE org = ?", (org,))
+        cursor = conn.execute(
+            "SELECT * FROM repos WHERE org = ?", (org,)
+        )
         rows = cursor.fetchall()
         conn.close()
         if not rows:
@@ -154,11 +159,14 @@ def get_last_fetched(org: str) -> str | None:
     try:
         conn = get_connection()
         cursor = conn.execute(
-            "SELECT MAX(last_fetched_at) FROM repos WHERE org = ?", (org,)
+            "SELECT MAX(last_fetched_at) FROM repos WHERE org = ?",
+            (org,),
         )
         result = cursor.fetchone()[0]
         conn.close()
         return result
     except Exception as exc:
-        logger.error("get_last_fetched failed for org '%s': %s", org, exc)
+        logger.error(
+            "get_last_fetched failed for org '%s': %s", org, exc
+        )
         return None
