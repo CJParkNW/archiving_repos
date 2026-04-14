@@ -10,6 +10,13 @@ import pandas as pd
 MAX_TIMEOUT = 100
 
 
+def get_rate_limit_remaining(headers_input: dict) -> int:
+    """Return the number of remaining GitHub API requests for this token."""
+    r = requests.get('https://api.github.com/rate_limit',
+                     headers=headers_input, timeout=MAX_TIMEOUT)
+    return r.json().get('rate', {}).get('remaining', -1)
+
+
 def read_all_repo_data(organization_name: str, headers_input: dict) -> list:
     """
     Use the provided API key and organization on GitHub to extract all general
