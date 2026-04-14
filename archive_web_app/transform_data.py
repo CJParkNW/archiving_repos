@@ -103,21 +103,27 @@ def calculate_archiving_score(num_open_issues: int,
     elif num_forks < MAY_BE_ACCEPTABLE_THRESHOLD:  # If there are some forms created
         score_metric += MAY_BE_ACCEPTABLE_STATUS  # Archiving may be okay to do.
 
-    # Convert the last time that the repo was pushed into epoch time
-    push_epoch = datetime.strptime(last_push_time,
-                                   '%Y-%m-%dT%H:%M:%SZ').timestamp()
-    # Calculate epoch time of today
-    today_epoch = datetime.now().timestamp()
-    # Calculate the difference between today and when the last push was.
-    time_diff_from_push = today_epoch - push_epoch
+    # A repo that has never been pushed to is effectively inactive —
+    # treat it the same as a push older than one year.
+    if last_push_time is None:
+        score_metric += ACCEPTABLE_STATUS
+    else:
+        # Convert the last time that the repo was pushed into epoch time
+        push_epoch = datetime.strptime(
+            last_push_time, '%Y-%m-%dT%H:%M:%SZ'
+        ).timestamp()
+        # Calculate epoch time of today
+        today_epoch = datetime.now().timestamp()
+        # Calculate the difference between today and when the last push was.
+        time_diff_from_push = today_epoch - push_epoch
 
-    # Checking to see when the last time a repo had a change pushed in.
-    if time_diff_from_push >= (EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR):
-        # If the push was year or more ago
-        score_metric += ACCEPTABLE_STATUS  # Archiving is acceptable
-    elif time_diff_from_push >= (EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR/2):
-        # If the push was 6 months to a year ago
-        score_metric += MAY_BE_ACCEPTABLE_STATUS  # Archiving may be okay
+        # Checking to see when the last time a repo had a change pushed in.
+        if time_diff_from_push >= (EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR):
+            # If the push was year or more ago
+            score_metric += ACCEPTABLE_STATUS  # Archiving is acceptable
+        elif time_diff_from_push >= (EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR/2):
+            # If the push was 6 months to a year ago
+            score_metric += MAY_BE_ACCEPTABLE_STATUS  # Archiving may be okay
 
     return score_metric
 

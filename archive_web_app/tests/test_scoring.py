@@ -10,15 +10,19 @@ Score breakdown (each condition contributes 0.2, partial conditions 0.1):
 Max score = 1.0 (strong archive candidate)
 Min score = 0.0 (should not be archived)
 """
-import pytest
+from datetime import datetime, timedelta
+
 from transform_data import calculate_archiving_score
 
 # A date guaranteed to be more than a year in the past
 OLD_PUSH = "2020-01-01T00:00:00Z"
 # A date guaranteed to be within the last month
-from datetime import datetime, timedelta
-RECENT_PUSH = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-SIX_MONTHS_AGO = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%dT%H:%M:%SZ")
+RECENT_PUSH = (
+    datetime.now() - timedelta(days=7)
+).strftime("%Y-%m-%dT%H:%M:%SZ")
+SIX_MONTHS_AGO = (
+    datetime.now() - timedelta(days=200)
+).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class TestPerfectArchiveCandidate:
@@ -62,7 +66,8 @@ class TestPartialScores:
         assert score == 0.8
 
     def test_moderate_stars_and_forks(self):
-        # +0.2 (no issues) +0.2 (no PRs) +0.1 (stars 5-9) +0.1 (forks 5-9) +0.2 (old push)
+        # +0.2 (no issues) +0.2 (no PRs) +0.1 (stars 5-9)
+        # +0.1 (forks 5-9) +0.2 (old push)
         score = calculate_archiving_score(
             num_open_issues=0,
             num_open_pull_requests=0,
@@ -73,7 +78,8 @@ class TestPartialScores:
         assert score == 0.8
 
     def test_push_between_six_months_and_one_year(self):
-        # +0.2 (no issues) +0.2 (no PRs) +0.2 (stars<5) +0.2 (forks<5) +0.1 (6-12mo push)
+        # +0.2 (no issues) +0.2 (no PRs) +0.2 (stars<5)
+        # +0.2 (forks<5) +0.1 (6-12mo push)
         score = calculate_archiving_score(
             num_open_issues=0,
             num_open_pull_requests=0,
@@ -116,6 +122,20 @@ class TestPartialScores:
             last_push_time=OLD_PUSH,
         )
         assert score_with_prs < score_without_prs
+
+
+class TestNullLastPushTime:
+    def test_none_push_time_does_not_raise(self):
+        # Repos that were never pushed should not crash the scorer
+        score = calculate_archiving_score(0, 0, 1, 1, None)
+        assert isinstance(score, float)
+
+    def test_none_push_time_treated_as_inactive(self):
+        # A repo with no push history should score the same as one pushed
+        # more than a year ago (full credit for the time component)
+        score_none = calculate_archiving_score(0, 0, 1, 1, None)
+        score_old = calculate_archiving_score(0, 0, 1, 1, OLD_PUSH)
+        assert score_none == score_old
 
 
 class TestScoreBounds:

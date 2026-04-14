@@ -189,6 +189,45 @@ def build_freshness_bar(org: str):
     )
 
 
+def build_calibration_callout(df):
+    """
+    Return a dbc.Alert summarizing how well the score agrees with repos
+    the org has already manually archived (ground-truth calibration).
+    """
+    archived_df = df[df['is_archived'].astype(bool)]
+    n_archived = len(archived_df)
+
+    if n_archived == 0:
+        return dbc.Alert(
+            "Calibration: no already-archived repos in this org — "
+            "unable to validate scores against ground truth.",
+            color="secondary",
+            className="py-2 mb-2",
+        )
+
+    HIGH_SCORE_THRESHOLD = 0.8
+    n_high = int((archived_df['overall_score'] >= HIGH_SCORE_THRESHOLD).sum())
+    pct = round(n_high / n_archived * 100)
+
+    if pct >= 70:
+        color, note = "success", "Strong agreement with existing archiving decisions."
+    elif pct >= 40:
+        color, note = "warning", "Moderate agreement — some archived repos scored lower than expected."
+    else:
+        color, note = "danger", "Low agreement — scoring may need tuning for this org."
+
+    return dbc.Alert(
+        [
+            html.Strong("Score calibration: "),
+            f"{n_high} of {n_archived} already-archived repos "
+            f"({pct}%) score ≥ {HIGH_SCORE_THRESHOLD}. ",
+            html.Em(note),
+        ],
+        color=color,
+        className="py-2 mb-2",
+    )
+
+
 def build_overview(df, org: str):
     """Build the overview page content from a dataframe."""
     fig_1 = c_viz.create_chart_per_language(df)
@@ -283,6 +322,7 @@ def build_overview(df, org: str):
                from 0.0 (keep) to 1.0 (archive). Rows are color-coded:
                green = strong archive candidate, yellow = moderate,
                red = likely keep. Click any column header to sort."""),
+        build_calibration_callout(df),
         button_to_download,
         html.P(),
         dbc.Row([dbc.Col(repo_table)]),
