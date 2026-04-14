@@ -7,9 +7,13 @@ Run this script directly to refresh the database for a given org:
 
 import logging
 import os
+import time
+
 from dotenv import load_dotenv
-import transform_data as td
+
 import database as db
+import datadog_utils as dd
+import transform_data as td
 
 load_dotenv()
 
@@ -24,22 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("repo_archiver.pipeline")
 
-# Datadog — optional; skipped gracefully if API key is not configured.
-_DD_API_KEY = os.getenv("DATADOG_API_KEY")
-if _DD_API_KEY:
-    try:
-        from datadog import initialize, api as _dd_api
-        initialize(api_key=_DD_API_KEY)
-        _dd_enabled = True
-        logger.info("Datadog initialized successfully.")
-    except Exception as _dd_exc:
-        logger.warning("Datadog initialization failed: %s", _dd_exc)
-        _dd_enabled = False
-else:
-    _dd_enabled = False
-    logger.info(
-        "DATADOG_API_KEY not set — Datadog metrics/events will be skipped."
-    )
+ARCHIVE_SCORE_THRESHOLD = 0.8
 
 
 def run(org_name: str):
@@ -49,32 +38,36 @@ def run(org_name: str):
     Args:
         org_name: GitHub organization name
     """
+    start_time = time.time()
     logger.info("Pipeline started — org: %s", org_name)
+    org_tags = [f"org:{org_name}"]
 
     db.init_db()
 
     logger.info("Fetching repos from GitHub API...")
-    df = td.create_entire_repo_dataframe(org_name, HEADERS)
-    rate_limit_remaining = td.get_rate_limit_remaining(HEADERS)
-    logger.info(
-        "GitHub API fetch complete — repos fetched: %d, "
-        "rate limit remaining: %d",
-        len(df),
-        rate_limit_remaining,
-    )
-
-    score_col = df["overall_score"]
-    logger.info(
-        "Scoring complete — repos scored: %d, score distribution: "
-        "min=%.1f, mean=%.2f, max=%.1f",
-        len(df),
-        score_col.min(),
-        score_col.mean(),
-        score_col.max(),
-    )
-
-    logger.info("Writing results to SQLite — rows to write: %d", len(df))
     try:
+        df = td.create_entire_repo_dataframe(org_name, HEADERS)
+        rate_limit_remaining = td.get_rate_limit_remaining(HEADERS)
+        logger.info(
+            "GitHub API fetch complete — repos fetched: %d, "
+            "rate limit remaining: %d",
+            len(df),
+            rate_limit_remaining,
+        )
+
+        score_col = df["overall_score"]
+        logger.info(
+            "Scoring complete — repos scored: %d, "
+            "score distribution: min=%.1f, mean=%.2f, max=%.1f",
+            len(df),
+            score_col.min(),
+            score_col.mean(),
+            score_col.max(),
+        )
+
+        logger.info(
+            "Writing results to SQLite — rows to write: %d", len(df)
+        )
         db.write_repos(org_name, df)
         logger.info(
             "DB write successful — %d rows written for org '%s'",
@@ -82,26 +75,75 @@ def run(org_name: str):
             org_name,
         )
     except Exception as exc:
-        logger.error("DB write failed for org '%s': %s", org_name, exc)
+        logger.error("Pipeline failed for org '%s': %s", org_name, exc)
+        dd.send_metric(
+            "repo_archiver.pipeline.failed", 1, tags=org_tags
+        )
         raise
 
-    if _dd_enabled:
-        try:
-            _dd_api.Event.create(
-                title="repo_archiver.pipeline.run",
-                text=f"Pipeline completed for org '{org_name}'",
-                tags=[f"org:{org_name}", f"repo_count:{len(df)}"],
-            )
-            _dd_api.Metric.send(
-                metric="repo_archiver.api.rate_limit_remaining",
-                points=rate_limit_remaining,
-                tags=[f"org:{org_name}"],
-            )
-            logger.info(
-                "Datadog event and metric emitted for org '%s'.", org_name
-            )
-        except Exception as exc:
-            logger.warning("Datadog emit failed: %s", exc)
+    duration = round(time.time() - start_time, 2)
+    archive_candidates = int(
+        (score_col >= ARCHIVE_SCORE_THRESHOLD).sum()
+    )
+
+    # Pipeline-level event and metrics
+    dd.send_event(
+        title="repo_archiver.pipeline.run",
+        text=f"Pipeline completed for org '{org_name}'",
+        tags=org_tags + [f"repo_count:{len(df)}"],
+    )
+    dd.send_metric(
+        "repo_archiver.pipeline.duration_seconds",
+        duration,
+        tags=org_tags,
+    )
+    dd.send_metric(
+        "repo_archiver.api.rate_limit_remaining",
+        rate_limit_remaining,
+        tags=org_tags,
+    )
+
+    # Org-level aggregate metrics
+    dd.send_metric(
+        "repo_archiver.repos.total", len(df), tags=org_tags
+    )
+    dd.send_metric(
+        "repo_archiver.repos.archive_candidates",
+        archive_candidates,
+        tags=org_tags,
+    )
+    dd.send_metric(
+        "repo_archiver.repos.score.mean",
+        round(float(score_col.mean()), 3),
+        tags=org_tags,
+    )
+    dd.send_metric(
+        "repo_archiver.repos.score.min",
+        float(score_col.min()),
+        tags=org_tags,
+    )
+    dd.send_metric(
+        "repo_archiver.repos.score.max",
+        float(score_col.max()),
+        tags=org_tags,
+    )
+
+    # Per-repo score (one time-series per repo, filterable by tag)
+    for _, row in df.iterrows():
+        dd.send_metric(
+            "repo_archiver.repo.score",
+            row["overall_score"],
+            tags=org_tags + [f"repo:{row['name']}"],
+        )
+
+    logger.info(
+        "Datadog metrics emitted — org: %s, repos: %d, "
+        "candidates: %d, duration: %.2fs",
+        org_name,
+        len(df),
+        archive_candidates,
+        duration,
+    )
 
     return df
 

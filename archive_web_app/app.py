@@ -16,6 +16,7 @@ import dash_bootstrap_components as dbc
 from PIL import Image
 import create_visualizations as c_viz
 import database as db
+import datadog_utils as dd
 import pipeline
 
 
@@ -432,6 +433,9 @@ def load_org(_n_clicks, org_input):
     org = org_input.strip()
     if db.read_repos(org).empty:
         pipeline.run(org)
+    dd.send_metric(
+        "repo_archiver.app.org_loaded", 1, tags=[f"org:{org}"]
+    )
     return org, html.Span(f"Loaded: {org}", style={"color": "#90ee90"})
 
 
@@ -511,6 +515,9 @@ def refresh_data(n_clicks, org):
     start = time.time()
     pipeline.run(org)
     elapsed = int(time.time() - start)
+    dd.send_metric(
+        "repo_archiver.app.data_refreshed", 1, tags=[f"org:{org}"]
+    )
     m, s = divmod(elapsed, 60)
     elapsed_text = f"{m}m {s}s" if m else f"{s}s"
     return html.Span(
