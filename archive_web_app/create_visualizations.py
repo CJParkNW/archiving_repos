@@ -134,6 +134,47 @@ def create_chart_top_repos_w_pull_requests(df):
     return fig
 
 
+def create_chart_top_repos_by_score(df):
+    """
+    Create a horizontal bar chart of the top 20 unarchived repos by
+    archiving score, highest score at the top.
+
+    Args:
+        df: Pandas dataframe that contains the organization's repo data
+
+    Returns:
+        fig: plotly.express figure - horizontal bar chart
+    """
+    top_20 = (
+        df[~df['is_archived'].astype(bool)]
+        .sort_values('overall_score', ascending=False)
+        .head(20)
+        .sort_values('overall_score', ascending=True)  # highest at top
+    )
+
+    fig = px.bar(
+        top_20,
+        x='overall_score',
+        y='name',
+        orientation='h',
+        title='Top 20 Archive Candidates by Score',
+        color='overall_score',
+        color_continuous_scale=[
+            [0, '#f8d7da'], [0.5, '#fff3cd'], [1, '#d4edda']
+        ],
+        range_x=[0, 1],
+        labels={
+            'overall_score': 'Archiving Score (0 = keep, 1 = archive)',
+            'name': 'Repository',
+        },
+        width=800,
+        height=600,
+    )
+    fig.update_coloraxes(showscale=False)
+    fig.update_layout(yaxis_title=None)
+    return fig
+
+
 def create_chart_distribution_of_scores(df):
     """
     Create a histogram representing the distribution of scores across all

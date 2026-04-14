@@ -4,10 +4,12 @@ while attempting to determine what GitHub Repos should be archived in an
 organization.
 """
 
+import math
 import os
+import time
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from dash import Dash, html, Output, Input, State, dcc, callback_context
+from dash import Dash, html, Output, Input, State, dcc, callback_context, dash_table
 import dash_bootstrap_components as dbc
 from PIL import Image
 import create_visualizations as c_viz
@@ -27,6 +29,10 @@ HEADERS = {
 # Change the input here if you would like to investigate other orgs
 ORG_NAME = 'plotly'
 REPO_NAME = 'plotly.py'
+
+# Refresh time estimate constants
+SECONDS_PER_REPO = 0.37   # empirical: observed ~83s for 226 repos
+ESTIMATE_ROUND_UP_SECONDS = 30  # round up to nearest N seconds for display
 
 # Ensure the DB and schema exist on startup
 db.init_db()
@@ -110,6 +116,21 @@ def build_freshness_bar(org: str):
     else:
         freshness_text = "No data cached yet"
 
+    # Estimate refresh duration: ~0.37s per repo, rounded up to next 30s.
+    # Falls back to a generic warning if no data is cached for this org yet.
+    num_repos = len(db.read_repos(org))
+    if num_repos == 0:
+        est_label = "unknown — no cached data for this org"
+    else:
+        est_sec = math.ceil(
+            num_repos * SECONDS_PER_REPO / ESTIMATE_ROUND_UP_SECONDS
+        ) * ESTIMATE_ROUND_UP_SECONDS
+        if est_sec >= 60:
+            m, s = divmod(est_sec, 60)
+            est_label = f"~{m}m {s}s" if s else f"~{m}m"
+        else:
+            est_label = f"~{est_sec}s"
+
     return dbc.Row(
         [
             dbc.Col(
@@ -124,8 +145,17 @@ def build_freshness_bar(org: str):
                 width="auto"
             ),
             dbc.Col(
-                dbc.Spinner(html.Div(id="refresh-status"), size="sm",
-                            color="secondary"),
+                html.Span(f"est. {est_label}",
+                          style={"fontSize": "0.78rem", "color": "#999",
+                                 "lineHeight": "36px"}),
+                width="auto"
+            ),
+            dbc.Col(
+                dcc.Loading(
+                    html.Div(id="refresh-status"),
+                    type="circle",
+                    color="#782c54",
+                ),
                 width="auto"
             ),
         ],
@@ -139,45 +169,109 @@ def build_overview(df):
     fig_1 = c_viz.create_chart_per_language(df)
     fig_2 = c_viz.create_chart_top_repos_w_issues(df)
     fig_3 = c_viz.create_chart_top_repos_w_pull_requests(df)
+    fig_score = c_viz.create_chart_top_repos_by_score(df)
 
-    sample_top_10 = (
-        df[['name', 'description', 'last_push_time', 'overall_score']]
-        [df['is_archived'] == False]
+    table_df = (
+        df[~df['is_archived'].astype(bool)]
         .sort_values('overall_score', ascending=False)
-        .head(10)
+        [['name', 'overall_score', 'num_open_issues',
+          'num_open_pull_requests', 'num_star_watchers',
+          'num_forks', 'last_push_time']]
     )
-    top_table = dbc.Table.from_dataframe(sample_top_10, striped=True,
-                                         bordered=True, hover=True)
+
+    repo_table = dash_table.DataTable(
+        data=table_df.to_dict('records'),
+        columns=[
+            {"name": "Repo",        "id": "name"},
+            {"name": "Score",       "id": "overall_score"},
+            {"name": "Open Issues", "id": "num_open_issues"},
+            {"name": "Open PRs",    "id": "num_open_pull_requests"},
+            {"name": "Stars",       "id": "num_star_watchers"},
+            {"name": "Forks",       "id": "num_forks"},
+            {"name": "Last Push",   "id": "last_push_time"},
+        ],
+        sort_action="native",
+        page_size=20,
+        style_table={"overflowX": "auto"},
+        style_header={
+            "backgroundColor": "#782c54",
+            "color": "white",
+            "fontWeight": "bold",
+            "textAlign": "left",
+        },
+        style_cell={
+            "textAlign": "left",
+            "padding": "8px",
+            "fontFamily": "sans-serif",
+            "fontSize": "13px",
+            "maxWidth": "220px",
+            "overflow": "hidden",
+            "textOverflow": "ellipsis",
+        },
+        style_data_conditional=[
+            {
+                "if": {"filter_query": "{overall_score} >= 0.8"},
+                "backgroundColor": "#d4edda",
+                "color": "#155724",
+            },
+            {
+                "if": {
+                    "filter_query": "{overall_score} >= 0.4 && {overall_score} < 0.8"
+                },
+                "backgroundColor": "#fff3cd",
+                "color": "#856404",
+            },
+            {
+                "if": {"filter_query": "{overall_score} < 0.4"},
+                "backgroundColor": "#f8d7da",
+                "color": "#721c24",
+            },
+        ],
+        tooltip_data=[
+            {"name": {"value": row["name"], "type": "markdown"}}
+            for row in table_df.to_dict("records")
+        ],
+        tooltip_duration=None,
+    )
+
     button_to_download = html.Div([
         html.Button("Download All Data as CSV", id="btn_csv"),
         dcc.Download(id="download-dataframe-csv"),
     ])
 
-    return (
-        html.H1(f"Overview of Organization: {ORG_NAME}"),
-        html.P(),
-        build_freshness_bar(ORG_NAME),
-        html.Hr(),
-        html.P("""The following table demonstrates a sample of repositories that
-               have been deemed as acceptable to archive. This can be seen by an
-               overall_score leaning/equivalent towards 1 on a scale from 0.0
-               (likely unacceptable to archive) to 1.0 (likely acceptable to
-               archive). While the table displays some data both calculated and
-               extracted from the GitHub REST API, it is highly recommended to
-               Download the entire CSV and review other repositories."""),
+    return dbc.Container([
+        dbc.Row(
+            [
+                dbc.Col(
+                    html.H2(f"Overview — {ORG_NAME}", className="mb-0"),
+                    width=True,
+                ),
+                dbc.Col(
+                    build_freshness_bar(ORG_NAME),
+                    width="auto",
+                ),
+            ],
+            align="center",
+            className="py-3 border-bottom mb-3",
+        ),
+        html.P("""The following table shows all unarchived repositories scored
+               from 0.0 (keep) to 1.0 (archive). Rows are color-coded:
+               green = strong archive candidate, yellow = moderate,
+               red = likely keep. Click any column header to sort."""),
         button_to_download,
         html.P(),
-        html.Div([
-            dbc.Row([
-                dbc.Col(top_table, width='auto'),
-                html.Hr(),
-                html.H1(f"Interactive Visualizations on {ORG_NAME}"),
-                dbc.Col(dcc.Graph(figure=fig_1), width='auto')]),
-            dbc.Row([
-                dbc.Col(dcc.Graph(figure=fig_2), width='auto'),
-                dbc.Col(dcc.Graph(figure=fig_3), width='auto')]),
-        ])
-    )
+        dbc.Row([dbc.Col(repo_table)]),
+        html.Hr(),
+        html.H4(f"Visualizations — {ORG_NAME}", className="mb-3"),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_score), width="auto"),
+            dbc.Col(dcc.Graph(figure=fig_1), width="auto"),
+        ]),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_2), width="auto"),
+            dbc.Col(dcc.Graph(figure=fig_3), width="auto"),
+        ]),
+    ], fluid=True)
 
 
 # Creates the structure for the deep dive repo page
@@ -187,10 +281,12 @@ def build_deep_dive(df):
     fig_6 = c_viz.request_data_participation(ORG_NAME, REPO_NAME, HEADERS)
     row_repo = df.loc[df['name'] == REPO_NAME].reset_index()
 
-    return (
-        html.H1(f"Repository Deep Dive for {REPO_NAME}"),
-        html.Hr(),
-        html.H4(f"This repository is described to do the following: {row_repo['description'][0]}"),
+    return dbc.Container([
+        dbc.Row(
+            dbc.Col(html.H2(f"Deep Dive — {REPO_NAME}", className="mb-0")),
+            className="py-3 border-bottom mb-3",
+        ),
+        html.P(f"Description: {row_repo['description'][0]}"),
         html.P("""When determining what criteria should be used for understanding
                whether a repository should be archived or not, there is a key
                component to understand."""),
@@ -204,15 +300,17 @@ def build_deep_dive(df):
                essential to review as well. While the history of a repository's
                changes may tell us a lot, it is not the only part of the story."""),
         html.Hr(),
-        html.Div(
-            dbc.Row([
-                dbc.Col(dcc.Graph(figure=fig_5), width='auto'),
-                dbc.Col(dcc.Graph(figure=fig_6), width='auto')
-            ])
-        ),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_5), width="auto"),
+            dbc.Col(dcc.Graph(figure=fig_6), width="auto"),
+        ]),
         html.Hr(),
-        html.H4(f"Access this repository at the following link: {row_repo['url'][0]}"),
-    )
+        html.P([
+            "View on GitHub: ",
+            html.A(row_repo['url'][0], href=row_repo['url'][0],
+                   target="_blank"),
+        ]),
+    ], fluid=True)
 
 
 # Creates the structure for the about page
@@ -271,8 +369,15 @@ def refresh_data(n_clicks):
     """Re-run the pipeline and refresh the database when the button is clicked."""
     if not n_clicks:
         return ""
+    start = time.time()
     pipeline.run(ORG_NAME)
-    return html.Span("Refreshed!", style={"color": "green", "fontSize": "0.85rem"})
+    elapsed = int(time.time() - start)
+    m, s = divmod(elapsed, 60)
+    elapsed_text = f"{m}m {s}s" if m else f"{s}s"
+    return html.Span(
+        f"Refreshed! ({elapsed_text})",
+        style={"color": "green", "fontSize": "0.85rem"}
+    )
 
 
 @app.callback(
