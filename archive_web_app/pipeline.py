@@ -128,13 +128,16 @@ def run(org_name: str):
         tags=org_tags,
     )
 
-    # Per-repo score (one time-series per repo, filterable by tag)
-    for _, row in df.iterrows():
-        dd.send_metric(
-            "repo_archiver.repo.score",
-            row["overall_score"],
-            tags=org_tags + [f"repo:{row['name']}"],
-        )
+    # Per-repo scores — one time-series per repo, sent in a single
+    # batched request so each series carries its own repo: tag.
+    dd.send_metrics_batch([
+        {
+            "metric": "repo_archiver.repo.score",
+            "points": row["overall_score"],
+            "tags": org_tags + [f"repo:{row['name']}"],
+        }
+        for _, row in df.iterrows()
+    ])
 
     logger.info(
         "Datadog metrics emitted — org: %s, repos: %d, "

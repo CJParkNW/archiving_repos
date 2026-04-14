@@ -6,6 +6,7 @@ so the rest of the app never needs to guard against DD being absent.
 """
 import logging
 import os
+import time
 
 from dotenv import load_dotenv
 
@@ -39,17 +40,49 @@ def send_metric(
     value: float,
     tags: list[str] | None = None,
 ) -> None:
-    """Send a gauge to Datadog, or no-op if DD is not configured."""
+    """Send a single gauge to Datadog, or no-op if DD is not configured."""
     if not _dd_enabled:
         return
     try:
         _dd_api.Metric.send(
-            metric=metric, points=value, tags=tags or []
+            metric=metric,
+            points=[[int(time.time()), value]],
+            tags=tags or [],
         )
     except Exception as exc:
         logger.warning(
             "Datadog metric send failed (%s): %s", metric, exc
         )
+
+
+def send_metrics_batch(metrics: list[dict]) -> None:
+    """
+    Send multiple metrics in a single API call.
+
+    Each dict must have 'metric' (str) and 'points' (float), and
+    optionally 'tags' (list[str]).  A timestamp is added automatically.
+
+    Using a single request keeps per-repo cardinality cheap and ensures
+    Datadog correctly attributes each data point to the right tag set.
+    """
+    if not _dd_enabled or not metrics:
+        return
+    now = int(time.time())
+    series = [
+        {
+            "metric": m["metric"],
+            "points": [[now, m["points"]]],
+            "tags": m.get("tags", []),
+        }
+        for m in metrics
+    ]
+    try:
+        _dd_api.Metric.send(series)
+        logger.info(
+            "Datadog batch: %d series submitted.", len(series)
+        )
+    except Exception as exc:
+        logger.warning("Datadog batch metric send failed: %s", exc)
 
 
 def send_event(
