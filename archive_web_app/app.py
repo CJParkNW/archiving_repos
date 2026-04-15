@@ -10,13 +10,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+import requests
 from dash import (Dash, html, Output, Input, State, dcc,
                   callback_context, dash_table, no_update)
 import dash_bootstrap_components as dbc
 from PIL import Image
 import create_visualizations as c_viz
 import database as db
-import datadog_utils as dd
 import pipeline
 
 
@@ -29,13 +29,17 @@ HEADERS = {
 }
 
 # Setting the organization and repo to deep dive into
-# Change the input here if you would like to investigate other orgs
+# Default repository to call.
 ORG_NAME = 'plotly'
 REPO_NAME = 'plotly.py'
 
 # Refresh time estimate constants
 SECONDS_PER_REPO = 0.37   # empirical: observed ~83s for 226 repos
 ESTIMATE_ROUND_UP_SECONDS = 30  # round up to nearest N seconds for display
+
+# Orgs above this public repo count are blocked from loading.
+# Each repo requires ~13 API calls; GitHub's authenticated limit is 5000/hour.
+ORG_REPO_LIMIT = 400
 
 # Ensure the DB and schema exist on startup
 db.init_db()
@@ -189,45 +193,8 @@ def build_freshness_bar(org: str):
         className="mb-3"
     )
 
-
-def build_calibration_callout(df):
-    """
-    Return a dbc.Alert summarizing how well the score agrees with repos
-    the org has already manually archived (ground-truth calibration).
-    """
-    archived_df = df[df['is_archived'].astype(bool)]
-    n_archived = len(archived_df)
-
-    if n_archived == 0:
-        return dbc.Alert(
-            "Calibration: no already-archived repos in this org — "
-            "unable to validate scores against ground truth.",
-            color="secondary",
-            className="py-2 mb-2",
-        )
-
-    HIGH_SCORE_THRESHOLD = 0.8
-    n_high = int((archived_df['overall_score'] >= HIGH_SCORE_THRESHOLD).sum())
-    pct = round(n_high / n_archived * 100)
-
-    if pct >= 70:
-        color, note = "success", "Strong agreement with existing archiving decisions."
-    elif pct >= 40:
-        color, note = "warning", "Moderate agreement — some archived repos scored lower than expected."
-    else:
-        color, note = "danger", "Low agreement — scoring may need tuning for this org."
-
-    return dbc.Alert(
-        [
-            html.Strong("Score calibration: "),
-            f"{n_high} of {n_archived} already-archived repos "
-            f"({pct}%) score ≥ {HIGH_SCORE_THRESHOLD}. ",
-            html.Em(note),
-        ],
-        color=color,
-        className="py-2 mb-2",
-    )
-
+# Ensuring that the archival scores are accurate to what is the scoring
+# criteria in the organization itself.
 
 def build_overview(df, org: str):
     """Build the overview page content from a dataframe."""
@@ -241,7 +208,7 @@ def build_overview(df, org: str):
         .sort_values('overall_score', ascending=False)
         [['name', 'overall_score', 'num_open_issues',
           'num_open_pull_requests', 'num_star_watchers',
-          'num_forks', 'last_push_time']]
+          'num_forks', 'latest_commit_time']]
     )
 
     repo_table = dash_table.DataTable(
@@ -253,7 +220,7 @@ def build_overview(df, org: str):
             {"name": "Open PRs",    "id": "num_open_pull_requests"},
             {"name": "Stars",       "id": "num_star_watchers"},
             {"name": "Forks",       "id": "num_forks"},
-            {"name": "Last Push",   "id": "last_push_time"},
+            {"name": "Latest Commit", "id": "latest_commit_time"},
         ],
         sort_action="native",
         page_size=20,
@@ -323,7 +290,6 @@ def build_overview(df, org: str):
                from 0.0 (keep) to 1.0 (archive). Rows are color-coded:
                green = strong archive candidate, yellow = moderate,
                red = likely keep. Click any column header to sort."""),
-        build_calibration_callout(df),
         button_to_download,
         html.P(),
         dbc.Row([dbc.Col(repo_table)]),
@@ -431,12 +397,41 @@ def load_org(_n_clicks, org_input):
         return no_update, html.Span("Please enter an org name.",
                                     style={"color": "yellow"})
     org = org_input.strip()
-    if db.read_repos(org).empty:
-        pipeline.run(org)
-    dd.send_metric(
-        "repo_archiver.app.org_loaded", 1, tags=[f"org:{org}"]
-    )
-    return org, html.Span(f"Loaded: {org}", style={"color": "#90ee90"})
+
+    # Pre-check: verify the org exists and is within the repo limit.
+    try:
+        resp = requests.get(
+            f"https://api.github.com/orgs/{org}",
+            headers=HEADERS,
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            return no_update, html.Span(
+                f"Organization '{org}' not found.",
+                style={"color": "red"},
+            )
+        if resp.status_code == 200:
+            repo_count = resp.json().get("public_repos", 0)
+            if repo_count > ORG_REPO_LIMIT:
+                return no_update, html.Span(
+                    f"'{org}' has {repo_count} public repos, which exceeds "
+                    f"the {ORG_REPO_LIMIT}-repo limit. Try a smaller organization.",
+                    style={"color": "orange"},
+                )
+        # For non-200/non-404 responses (e.g. 403 rate limit), fall through
+        # to the pipeline which will surface a clear error via its own handler.
+    except requests.exceptions.RequestException:
+        pass  # Network/timeout error — let the pipeline attempt it.
+
+    try:
+        if db.read_repos(org).empty:
+            pipeline.run(org)
+        return org, html.Span(f"Loaded: {org}", style={"color": "#90ee90"})
+    except Exception as exc:
+        return no_update, html.Span(
+            f"Failed to load '{org}': {exc}",
+            style={"color": "red"},
+        )
 
 
 @app.callback(
@@ -515,9 +510,6 @@ def refresh_data(n_clicks, org):
     start = time.time()
     pipeline.run(org)
     elapsed = int(time.time() - start)
-    dd.send_metric(
-        "repo_archiver.app.data_refreshed", 1, tags=[f"org:{org}"]
-    )
     m, s = divmod(elapsed, 60)
     elapsed_text = f"{m}m {s}s" if m else f"{s}s"
     return html.Span(

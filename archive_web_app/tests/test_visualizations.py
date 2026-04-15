@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import pytest
 import create_visualizations as c_viz
 
-
+# Generates a sample DF to test the functions/tests
 def _sample_df(n=15):
     """Return a DataFrame of n synthetic repos suitable for all chart functions."""
     return pd.DataFrame([
@@ -27,7 +27,7 @@ def _sample_df(n=15):
         for i in range(n)
     ])
 
-
+# Ensures that a chart is returned and at least one instance of data exists.
 class TestCreateChartPerLanguage:
     def test_returns_figure(self):
         fig = c_viz.create_chart_per_language(_sample_df())
@@ -37,7 +37,7 @@ class TestCreateChartPerLanguage:
         fig = c_viz.create_chart_per_language(_sample_df())
         assert len(fig.data) > 0
 
-
+#Ensures that the chart returns and that chart caps are displaying.
 class TestCreateChartTopReposWithIssues:
     def test_returns_figure(self):
         fig = c_viz.create_chart_top_repos_w_issues(_sample_df())
@@ -47,7 +47,7 @@ class TestCreateChartTopReposWithIssues:
         fig = c_viz.create_chart_top_repos_w_issues(_sample_df(n=20))
         assert len(fig.data[0].x) <= 10
 
-
+# Ensures that a figure is returned and that it is showing the max caps.
 class TestCreateChartTopReposWithPullRequests:
     def test_returns_figure(self):
         fig = c_viz.create_chart_top_repos_w_pull_requests(_sample_df())
@@ -57,7 +57,7 @@ class TestCreateChartTopReposWithPullRequests:
         fig = c_viz.create_chart_top_repos_w_pull_requests(_sample_df(n=20))
         assert len(fig.data[0].x) <= 10
 
-
+# Ensures that that the horiz bar chart exists 
 class TestCreateChartTopReposByScore:
     def test_returns_figure(self):
         fig = c_viz.create_chart_top_repos_by_score(_sample_df())

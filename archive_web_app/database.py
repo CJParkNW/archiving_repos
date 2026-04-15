@@ -6,16 +6,14 @@ Handles schema creation, writes from the pipeline, and reads for the web app.
 import logging
 import sqlite3
 from datetime import datetime, timezone
-
 import pandas as pd
 
 DB_PATH = "repos.db"
-
 REQUIRED_COLUMNS = {"name", "overall_score"}
-
 logger = logging.getLogger("repo_archiver.database")
 
-
+# Setting up DB to ensure that there is an easier way of saving the
+# data from the populated repos
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -42,11 +40,18 @@ def init_db():
             created_time          TEXT,
             last_update_time      TEXT,
             num_open_pull_requests INTEGER,
+            latest_commit_time    TEXT,
+            latest_pr_time        TEXT,
             overall_score         REAL,
             last_fetched_at       TEXT NOT NULL,
             PRIMARY KEY (org, name)
         )
     """)
+    for col in ("latest_commit_time TEXT", "latest_pr_time TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE repos ADD COLUMN {col}")
+        except Exception:
+            pass  # Column already exists
     conn.commit()
     conn.close()
 
@@ -88,8 +93,9 @@ def write_repos(org: str, df: pd.DataFrame):
                     is_fork, num_forks, num_star_watchers,
                     language, num_open_issues, is_archived,
                     last_push_time, created_time, last_update_time,
-                    num_open_pull_requests, overall_score, last_fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    num_open_pull_requests, latest_commit_time,
+                    latest_pr_time, overall_score, last_fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 row.get("id"),
                 org,
@@ -106,6 +112,8 @@ def write_repos(org: str, df: pd.DataFrame):
                 row.get("created_time"),
                 row.get("last_update_time"),
                 row.get("num_open_pull_requests"),
+                row.get("latest_commit_time"),
+                row.get("latest_pr_time"),
                 row.get("overall_score"),
                 now,
             ))

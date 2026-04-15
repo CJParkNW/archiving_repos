@@ -8,6 +8,10 @@ import requests
 import pandas as pd
 
 MAX_TIMEOUT = 100
+# Maximum number of branches to check when scanning for the latest commit.
+# Caps API calls for repos with many branches; 10 is enough to catch recent
+# activity on any actively-developed repo.
+MAX_BRANCHES_TO_CHECK = 10
 
 
 def get_rate_limit_remaining(headers_input: dict) -> int:
@@ -17,7 +21,8 @@ def get_rate_limit_remaining(headers_input: dict) -> int:
     return r.json().get('rate', {}).get('remaining', -1)
 
 
-def read_all_repo_data(organization_name: str, headers_input: dict) -> list:
+def read_all_repo_data(
+        organization_name: str, headers_input: dict) -> tuple[list, int]:
     """
     Use the provided API key and organization on GitHub to extract all general
     data on all available/accessible repositories from GitHub's REST API.
@@ -28,6 +33,7 @@ def read_all_repo_data(organization_name: str, headers_input: dict) -> list:
 
     Returns:
         output_file: JSON formatted list of all repo outputs from GitHub API
+        num_calls: Total number of GitHub API calls made
     """
     # Calling the API endpoint with proper headers/API Key
     r = requests.get(f'https://api.github.com/orgs/{organization_name}/repos',
@@ -35,23 +41,39 @@ def read_all_repo_data(organization_name: str, headers_input: dict) -> list:
 
     # Converting HTTP output into readable JSON
     output_file = r.json()
+    if not isinstance(output_file, list):
+        raise ValueError(
+            f"GitHub API returned an unexpected response for org "
+            f"'{organization_name}': {output_file.get('message', output_file)}"
+        )
+    num_calls = 1
     # Using Pagination, while there are additional pages in the request output,
     # Continue to call until the end to create one complete JSON file
     while 'next' in r.links.keys():
         r = requests.get(r.links['next']['url'], timeout=MAX_TIMEOUT)
         output_file.extend(r.json())
-        # Source: https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28#list-organization-repositories
+        num_calls += 1
+        # Source: docs.github.com/en/rest/repos/repos
+        # ?apiVersion=2022-11-28#list-organization-repositories
 
-    return output_file
+    return output_file, num_calls
 
 
 def calculate_archiving_score(num_open_issues: int,
                               num_open_pull_requests: int,
-                              star_watcher_count: int, num_forks: int,
-                              last_push_time: str) -> float:
+                              star_watcher_count: int,
+                              num_forks: int,
+                              latest_commit_time: str,
+                              latest_pr_time: str,
+                              median_issues: float,
+                              median_prs: float,
+                              median_stars: float,
+                              median_forks: float) -> float:
     """
     Uses the provided metadata on a repo to calculate a metric for whether it
-    would be acceptable to archive the selected repository.
+    would be acceptable to archive the selected repository. Thresholds for
+    issues, pull requests, stars, and forks are derived from the organization's
+    own median values so that scoring adapts to the activity level of each org.
     - Higher score indicates that it should be archived
     - Score of 0 indicates that it should not be archived.
     - Score of 1 indicates that it should be archived.
@@ -61,71 +83,97 @@ def calculate_archiving_score(num_open_issues: int,
         num_open_pull_requests: Total number of open pull requests in the repo
         star_watcher_count: Total number of stars on the repo
         num_forks: Total number of forks created based off the repo
-        last_push_time: Last time a push has occurred in the repo
+        latest_commit_time: Date of the most recent commit across all branches
+        latest_pr_time: Date of the most recently updated PR (any state),
+            or None if the repo has never had a PR
+        median_issues: Organization-wide median number of open issues
+        median_prs: Organization-wide median number of open pull requests
+        median_stars: Organization-wide median star/watcher count
+        median_forks: Organization-wide median fork count
 
     Returns:
         score_metric: Value ranging from 0.0 to 1.0 that determines if a repo
         should or should not be archived.
 
     """
-    # Defining core constants for calculating acceptable metric
     EPOCH_TIME_DAY = 86400
     NUM_DAYS_IN_YEAR = 365
-    ACCEPTABLE_THRESHOLD = 5
-    ACCEPTABLE_STATUS = 0.2
-    MAY_BE_ACCEPTABLE_THRESHOLD = 10
-    MAY_BE_ACCEPTABLE_STATUS = 0.1
 
-    # Ensures that score_metric is set to 0 before calculating
+    # Per-criterion score weights (full / partial).
+    # Recency signals carry the most weight; stars and forks are supporting.
+    COMMIT_FULL = 0.25
+    COMMIT_PARTIAL = 0.15
+    ISSUES_FULL = 0.20
+    ISSUES_PARTIAL = 0.10
+    PRS_COUNT_FULL = 0.20
+    PRS_COUNT_PARTIAL = 0.10
+    PR_TIME_FULL = 0.15
+    PR_TIME_PARTIAL = 0.10
+    STARS_FULL = 0.10
+    STARS_PARTIAL = 0.05
+    FORKS_FULL = 0.10
+    FORKS_PARTIAL = 0.05
+
     score_metric = 0
+    today_epoch = datetime.now().timestamp()
 
-    # Checking open issues — fewer issues makes archiving more acceptable
-    if num_open_issues == 0:
-        score_metric += ACCEPTABLE_STATUS
-    elif num_open_issues < ACCEPTABLE_THRESHOLD:
-        score_metric += MAY_BE_ACCEPTABLE_STATUS
-
-    # Checking open pull requests — fewer PRs makes archiving more acceptable
-    if num_open_pull_requests == 0:
-        score_metric += ACCEPTABLE_STATUS
-    elif num_open_pull_requests < ACCEPTABLE_THRESHOLD:
-        score_metric += MAY_BE_ACCEPTABLE_STATUS
-
-    # Checking to see if there are any stars on the repo
-    if star_watcher_count < ACCEPTABLE_THRESHOLD:  # If there are very few stars
-        score_metric += ACCEPTABLE_STATUS  # Archiving is acceptable
-    elif star_watcher_count < MAY_BE_ACCEPTABLE_THRESHOLD:  # If there are some stars
-        score_metric += MAY_BE_ACCEPTABLE_STATUS  # Archiving may be okay to do.
-    # Using stars since many of GitHub's own repo ranking is based off of stars
-    # Source: https://docs.github.com/en/get-started/exploring-projects-on-github/saving-repositories-with-stars#about-stars
-
-    # Checking to see if there are a lot of forks created from this repo
-    if num_forks < ACCEPTABLE_THRESHOLD:  # If there are very few forks created
-        score_metric += ACCEPTABLE_STATUS  # Archiving is acceptable
-    elif num_forks < MAY_BE_ACCEPTABLE_THRESHOLD:  # If there are some forms created
-        score_metric += MAY_BE_ACCEPTABLE_STATUS  # Archiving may be okay to do.
-
-    # A repo that has never been pushed to is effectively inactive —
-    # treat it the same as a push older than one year.
-    if last_push_time is None:
-        score_metric += ACCEPTABLE_STATUS
+    # 1. Latest commit recency (0.25 max) — most important signal.
+    # A repo with no commits is treated as fully inactive.
+    if latest_commit_time is None:
+        score_metric += COMMIT_FULL
     else:
-        # Convert the last time that the repo was pushed into epoch time
-        push_epoch = datetime.strptime(
-            last_push_time, '%Y-%m-%dT%H:%M:%SZ'
+        commit_epoch = datetime.strptime(
+            latest_commit_time, '%Y-%m-%dT%H:%M:%SZ'
         ).timestamp()
-        # Calculate epoch time of today
-        today_epoch = datetime.now().timestamp()
-        # Calculate the difference between today and when the last push was.
-        time_diff_from_push = today_epoch - push_epoch
+        commit_age = today_epoch - commit_epoch
+        if commit_age >= EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR:
+            score_metric += COMMIT_FULL
+        elif commit_age >= EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR / 2:
+            score_metric += COMMIT_PARTIAL
 
-        # Checking to see when the last time a repo had a change pushed in.
-        if time_diff_from_push >= (EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR):
-            # If the push was year or more ago
-            score_metric += ACCEPTABLE_STATUS  # Archiving is acceptable
-        elif time_diff_from_push >= (EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR/2):
-            # If the push was 6 months to a year ago
-            score_metric += MAY_BE_ACCEPTABLE_STATUS  # Archiving may be okay
+    # 2. Open issues count (0.20 max).
+    # Zero is always a strong signal; below the org median earns
+    # partial credit.
+    if num_open_issues == 0:
+        score_metric += ISSUES_FULL
+    elif num_open_issues < median_issues:
+        score_metric += ISSUES_PARTIAL
+
+    # 3. Open pull request count (0.20 max).
+    # Zero is always a strong signal; below the org median earns
+    # partial credit.
+    if num_open_pull_requests == 0:
+        score_metric += PRS_COUNT_FULL
+    elif num_open_pull_requests < median_prs:
+        score_metric += PRS_COUNT_PARTIAL
+
+    # 4. PR activity recency (0.15 max).
+    # A repo that has never had a PR is treated as fully inactive.
+    if latest_pr_time is None:
+        score_metric += PR_TIME_FULL
+    else:
+        pr_epoch = datetime.strptime(
+            latest_pr_time, '%Y-%m-%dT%H:%M:%SZ'
+        ).timestamp()
+        pr_age = today_epoch - pr_epoch
+        if pr_age >= EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR:
+            score_metric += PR_TIME_FULL
+        elif pr_age >= EPOCH_TIME_DAY * NUM_DAYS_IN_YEAR / 2:
+            score_metric += PR_TIME_PARTIAL
+
+    # 5. Stars (0.10 max) — below org median → full; below 2× median → partial.
+    # Source: docs.github.com/en/get-started/exploring-projects-on-github/
+    # saving-repositories-with-stars#about-stars
+    if star_watcher_count < median_stars:
+        score_metric += STARS_FULL
+    elif star_watcher_count < median_stars * 2:
+        score_metric += STARS_PARTIAL
+
+    # 6. Forks (0.10 max) — below org median → full; below 2× median → partial.
+    if num_forks < median_forks:
+        score_metric += FORKS_FULL
+    elif num_forks < median_forks * 2:
+        score_metric += FORKS_PARTIAL
 
     return score_metric
 
@@ -145,10 +193,15 @@ def collect_data_on_pull_requests(organization_name: str,
         num_open_pull_requests: Total number of open pull requests in the repo
     """
     # Pulling additional data on if there are any open pull requests
-    pull_request_endpoint = requests.get(f"https://api.github.com/repos/{organization_name}/{repository_name}/pulls?state=open",
-                                         headers=headers_input,
-                                         timeout=MAX_TIMEOUT)
-    # Source: https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28#list-pull-requests
+    pr_url = (
+        f"https://api.github.com/repos/{organization_name}"
+        f"/{repository_name}/pulls?state=open"
+    )
+    pull_request_endpoint = requests.get(
+        pr_url, headers=headers_input, timeout=MAX_TIMEOUT
+    )
+    # Source: docs.github.com/en/rest/pulls/pulls
+    # ?apiVersion=2022-11-28#list-pull-requests
     # Outputs information on any open pull requests
     pull_request_output = pull_request_endpoint.json()
     # Counts the total number of open pull requests (if available)
@@ -156,6 +209,99 @@ def collect_data_on_pull_requests(organization_name: str,
     num_open_pull_requests = len(pull_request_output)
 
     return num_open_pull_requests
+
+
+def get_latest_commit_date(organization_name: str,
+                           repository_name: str,
+                           headers_input: dict) -> tuple[str | None, int]:
+    """
+    Return the ISO-8601 date string of the most recent commit across all
+    branches of the repo, or None if the repo has no commits.
+
+    Fetches branches in one call (capped at MAX_BRANCHES_TO_CHECK), then
+    fetches the HEAD commit of each to find the latest committer date.
+
+    Args:
+        organization_name: GitHub organization name
+        repository_name: Repository name within the organization
+        headers_input: Request headers containing the API token
+
+    Returns:
+        latest_date: ISO-8601 date string of the most recent commit, or None
+    """
+    branches_url = (
+        f"https://api.github.com/repos/{organization_name}"
+        f"/{repository_name}/branches"
+    )
+    branches_resp = requests.get(
+        branches_url,
+        params={'per_page': MAX_BRANCHES_TO_CHECK},
+        headers=headers_input,
+        timeout=MAX_TIMEOUT,
+    )
+    branches = branches_resp.json()
+    if not isinstance(branches, list) or not branches:
+        return None, 1
+
+    commits_base = (
+        f"https://api.github.com/repos/{organization_name}"
+        f"/{repository_name}/commits"
+    )
+    latest_date = None
+    num_calls = 1  # branches call
+    for branch in branches:
+        resp = requests.get(
+            commits_base,
+            params={'sha': branch['name'], 'per_page': 1},
+            headers=headers_input,
+            timeout=MAX_TIMEOUT,
+        )
+        num_calls += 1
+        commits = resp.json()
+        if isinstance(commits, list) and commits:
+            commit_date = commits[0]['commit']['committer']['date']
+            if latest_date is None or commit_date > latest_date:
+                latest_date = commit_date
+
+    return latest_date, num_calls
+
+
+def get_latest_pr_date(organization_name: str,
+                       repository_name: str,
+                       headers_input: dict) -> str | None:
+    """
+    Return the ISO-8601 updated_at date of the most recently active PR
+    (any state: open, closed, or merged), or None if the repo has no PRs.
+
+    Args:
+        organization_name: GitHub organization name
+        repository_name: Repository name within the organization
+        headers_input: Request headers containing the API token
+
+    Returns:
+        latest_pr_date: ISO-8601 date string of the most recent PR, or None
+    """
+    pr_url = (
+        f"https://api.github.com/repos/{organization_name}"
+        f"/{repository_name}/pulls"
+    )
+    resp = requests.get(
+        pr_url,
+        params={
+            'state': 'all',
+            'sort': 'updated',
+            'direction': 'desc',
+            'per_page': 1,
+        },
+        headers=headers_input,
+        timeout=MAX_TIMEOUT,
+    )
+    # Source: docs.github.com/en/rest/pulls/pulls
+    # ?apiVersion=2022-11-28#list-pull-requests
+    prs = resp.json()
+    if not isinstance(prs, list) or not prs:
+        return None
+    return prs[0]['updated_at']
 
 
 def create_entire_repo_dataframe(organization_name: str,
@@ -172,76 +318,79 @@ def create_entire_repo_dataframe(organization_name: str,
         df: Entire dataframe with all of an organization's repos and info
     """
 
-    output_file = read_all_repo_data(organization_name, headers_input)
+    output_file, api_calls = read_all_repo_data(
+        organization_name, headers_input
+    )
 
-    # Setting up empty pandas dataframe to save and
-    # organize repo information from API endpoint
-    df = pd.DataFrame(columns=['name', 'id', 'url', 'description',
-                               'is_fork', 'num_forks',
-                               'num_star_watchers',
-                               'language', 'num_open_issues',
-                               'is_archived', 'last_push_time',
-                               'created_time', 'last_update_time',
-                               'num_open_pull_requests',
-                               'overall_score'])
+    # Phase 1: collect raw fields for every repo (no scoring yet).
+    # All repos must be fetched first so we can derive org-wide medians.
+    rows = []
+    for repo in output_file:
+        num_open_pull_requests = collect_data_on_pull_requests(
+            organization_name, repo['name'], headers_input
+        )
+        api_calls += 1
+        latest_commit_time, commit_calls = get_latest_commit_date(
+            organization_name, repo['name'], headers_input
+        )
+        api_calls += commit_calls
+        latest_pr_time = get_latest_pr_date(
+            organization_name, repo['name'], headers_input
+        )
+        api_calls += 1
+        rows.append({
+            'name':                   repo['name'],
+            'id':                     repo['id'],
+            'url':                    repo['html_url'],
+            'description':            repo['description'],
+            'is_fork':                repo['fork'],
+            'num_forks':              repo['forks_count'],
+            'num_star_watchers':      repo['stargazers_count'],
+            # Source: docs.github.com/en/rest/activity/starring
+            # ?apiVersion=2022-11-28#starring-versus-watching
+            'language':               repo['language'],
+            'num_open_issues':        repo['open_issues_count'],
+            'is_archived':            repo['archived'],
+            'last_push_time':         repo['pushed_at'],
+            'created_time':           repo['created_at'],
+            'last_update_time':       repo['updated_at'],
+            # Source: https://github.com/orgs/community/discussions/24442
+            'num_open_pull_requests': num_open_pull_requests,
+            'latest_commit_time':     latest_commit_time,
+            'latest_pr_time':         latest_pr_time,
+        })
 
-    # Iterate through the entire output JSON to organize necessary
-    # information on each repo
-    num_repos = len(output_file)
+    df = pd.DataFrame(rows)
 
-    for i in range(num_repos):
-        # Since output provides a lot of data -> Extracting out important parts
-        # Name of the Repo
-        repo_name = output_file[i]['name']
-        # Unique ID of the Repo
-        repo_id = output_file[i]['id']
-        # URL to access Repo
-        repo_url = output_file[i]['html_url']
-        # Description used
-        repo_description = output_file[i]['description']
-        # Is this repo derived from a Fork
-        is_fork = output_file[i]['fork']
-        # How many forks have been made of this repo?
-        num_forks = output_file[i]['forks_count']
-        # Num of stars on repo
-        star_watcher_count = output_file[i]['stargazers_count']
-        # Source: https://docs.github.com/en/rest/activity/starring?apiVersion=2022-11-28#starring-versus-watching
-        # Coding Language
-        repo_language = output_file[i]['language']
-        # Num of open issues
-        num_open_issues = output_file[i]['open_issues_count']
-        # Has the repo already been archived
-        is_archived = output_file[i]['archived']
-        # updated anytime commit is pushed to repo's branches
-        last_push_time = output_file[i]['pushed_at']
-        # when the repo was created
-        created_time = output_file[i]['created_at']
-        # updated any time repo object changed
-        last_update_time = output_file[i]['updated_at']
-        # Source: https://github.com/orgs/community/discussions/24442
+    # Phase 2: compute org-wide medians to use as dynamic scoring thresholds.
+    median_issues = df['num_open_issues'].median()
+    median_prs = df['num_open_pull_requests'].median()
+    median_stars = df['num_star_watchers'].median()
+    median_forks = df['num_forks'].median()
 
-        # Collecting information on any open pull requests in a repo
-        num_open_pull_requests = collect_data_on_pull_requests(organization_name,
-                                                               repo_name,
-                                                               headers_input)
+    # Phase 3: score every repo relative to the org medians computed above.
+    df['overall_score'] = df.apply(
+        lambda row: round(
+            calculate_archiving_score(
+                row['num_open_issues'],
+                row['num_open_pull_requests'],
+                row['num_star_watchers'],
+                row['num_forks'],
+                row['latest_commit_time'],
+                row['latest_pr_time'],
+                median_issues,
+                median_prs,
+                median_stars,
+                median_forks,
+            ),
+            1,
+        ),
+        axis=1,
+    )
 
-        # Calling function to calculate the score for whether the repo should
-        # be archived or not
-        total_score = calculate_archiving_score(num_open_issues,
-                                                num_open_pull_requests,
-                                                star_watcher_count,
-                                                num_forks,
-                                                last_push_time)
-        rounded_score = round(total_score, 1)  # Rounding to ensure consistency
-
-        # Create a row in the dataframe tracking all repos of an organization
-        df.loc[len(df)] = [repo_name, repo_id, repo_url,
-                           repo_description, is_fork, num_forks,
-                           star_watcher_count, repo_language,
-                           num_open_issues, is_archived,
-                           last_push_time, created_time,
-                           last_update_time,
-                           num_open_pull_requests,
-                           rounded_score]
-
-    return df
+    return df[['name', 'id', 'url', 'description', 'is_fork', 'num_forks',
+               'num_star_watchers', 'language', 'num_open_issues',
+               'is_archived', 'last_push_time', 'created_time',
+               'last_update_time', 'num_open_pull_requests',
+               'latest_commit_time', 'latest_pr_time',
+               'overall_score']], api_calls
