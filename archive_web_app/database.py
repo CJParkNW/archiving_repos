@@ -156,6 +156,19 @@ def read_repos(org: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def get_all_orgs() -> list[str]:
+    """Return all distinct org names stored in the database."""
+    try:
+        conn = get_connection()
+        cursor = conn.execute("SELECT DISTINCT org FROM repos")
+        rows = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+    except Exception as exc:
+        logger.error("get_all_orgs failed: %s", exc)
+        return []
+
+
 def get_last_fetched(org: str) -> str | None:
     """
     Return the most recent last_fetched_at timestamp for an org, or None.

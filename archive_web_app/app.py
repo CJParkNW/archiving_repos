@@ -15,6 +15,7 @@ from dash import (Dash, html, Output, Input, State, dcc,
                   callback_context, dash_table, no_update)
 import dash_bootstrap_components as dbc
 from PIL import Image
+from apscheduler.schedulers.background import BackgroundScheduler
 import create_visualizations as c_viz
 import database as db
 import pipeline
@@ -52,6 +53,16 @@ df_repos = db.read_repos(ORG_NAME)
 if df_repos.empty:
     print("No cached data found — running pipeline to populate database...")
     df_repos = pipeline.run(ORG_NAME)
+
+# Background scheduler: emit cached Datadog metrics every 10 minutes
+# for every org stored in the DB, without hitting the GitHub API.
+def _emit_scheduled_metrics():
+    for org in db.get_all_orgs():
+        pipeline.emit_cached_metrics(org)
+
+_scheduler = BackgroundScheduler(daemon=True)
+_scheduler.add_job(_emit_scheduled_metrics, "interval", minutes=2)
+_scheduler.start()
 
 # Calling image for About Us page
 github_logo_path = Image.open("images/github-mark.png")

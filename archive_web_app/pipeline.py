@@ -199,6 +199,78 @@ def run(org_name: str):
     return df
 
 
+def emit_cached_metrics(org_name: str) -> None:
+    """
+    Emit org- and repo-level Datadog metrics from cached DB data.
+
+    Does not hit the GitHub API, so it's safe to call on a short interval
+    without burning through rate limits.  Intended for use by the background
+    scheduler in app.py.
+    """
+    df = db.read_repos(org_name)
+    if df.empty:
+        logger.info(
+            "No cached data for org '%s' — skipping scheduled metrics.",
+            org_name,
+        )
+        return
+
+    org_tags = [f"org:{org_name}"]
+    score_col = df["overall_score"]
+    archive_candidates = int((score_col >= ARCHIVE_SCORE_THRESHOLD).sum())
+
+    dd.send_metric("repo_archiver.repos.total", len(df), tags=org_tags)
+    dd.send_metric(
+        "repo_archiver.repos.archive_candidates",
+        archive_candidates,
+        tags=org_tags,
+    )
+    dd.send_metric(
+        "repo_archiver.repos.already_archived",
+        int(df["is_archived"].sum()),
+        tags=org_tags,
+    )
+    dd.send_metric(
+        "repo_archiver.repos.forked",
+        int(df["is_fork"].sum()),
+        tags=org_tags,
+    )
+
+    per_repo_metrics = []
+    for _, row in df.iterrows():
+        repo_tags = org_tags + [f"repo:{row['name']}"]
+        last_push = row.get("last_push_time")
+        days_since_push = (
+            (datetime.now(timezone.utc) - datetime.strptime(
+                last_push, "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)).days
+            if last_push else None
+        )
+        per_repo_metrics += [
+            {"metric": "repo_archiver.repo.score",
+             "points": row["overall_score"], "tags": repo_tags},
+            {"metric": "repo_archiver.repo.open_issues",
+             "points": row["num_open_issues"], "tags": repo_tags},
+            {"metric": "repo_archiver.repo.open_prs",
+             "points": row["num_open_pull_requests"], "tags": repo_tags},
+            {"metric": "repo_archiver.repo.stars",
+             "points": row["num_star_watchers"], "tags": repo_tags},
+            {"metric": "repo_archiver.repo.forks",
+             "points": row["num_forks"], "tags": repo_tags},
+        ]
+        if days_since_push is not None:
+            per_repo_metrics.append(
+                {"metric": "repo_archiver.repo.days_since_push",
+                 "points": days_since_push, "tags": repo_tags}
+            )
+    dd.send_metrics_batch(per_repo_metrics)
+    logger.info(
+        "Scheduled Datadog metrics emitted — org: %s, repos: %d",
+        org_name,
+        len(df),
+    )
+
+
 if __name__ == "__main__":
     ORG_NAME = "plotly"
     run(ORG_NAME)
