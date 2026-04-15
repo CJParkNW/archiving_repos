@@ -2,9 +2,9 @@
 The main objective of this project is to provides an interactive summary or visualization that helps organizations determine which of its public repositories could/should be archived.
 
 ## Background
-[Archiving repositories](https://docs.github.com/en/organizations/managing-organization-settings/archiving-an-organization) is a core part of maintaining code/technology that may no longer be relevant, but still beneficial to have as reference. By archiving, repositories become read-only for all users and indicates to a user that it is no longer actively maintained.
+[Archiving repositories](https://docs.github.com/en/organizations/managing-organization-settings/archiving-an-organization) is a core part of maintaining code/technology in an organization that may no longer be relevant to work on, but still beneficial to have as reference. By archiving, repositories become read-only for all users and explicitly indicates to a user that it is no longer actively maintained.
 
-However, after some time it can become difficult to actively review and determine whether a repository should be archived or not. There are several factors that can impact whether a repository should be archived, such as: current issues, pull requests, change/commit history, influence, etc. If a repository is archived without consideration of this, there is a risk of needing to edit files/documentation associated with the repository in the future which can no longer be changed unless someone with access reverses archiving and allows these changes.
+However, after some time it can become difficult and labor-intensive to actively review and determine whether a repository should be archived or not. There are several factors that can impact whether a repository should be archived, such as: current issues, pull requests, change/commit history, influence, etc. If a repository is archived without consideration of this, there is a risk of needing to edit files/documentation associated with the repository in the future which can no longer be changed unless someone with access reverses archiving and allows these changes.
 
 ## Major Decisions in this Project
 - In order to properly determine whether a repository can be archived, standards across all repositories had to be set.
@@ -41,8 +41,8 @@ python app.py
 ```
 # Setting the organization and repo to deep dive into
 # Change the input on lines 26 to 29 if you would like to investigate other organizations or repositories.
-ORG_NAME = 'brown-ccv'
-REPO_NAME = 'honeycomb'
+ORG_NAME = 'plotly'
+REPO_NAME = 'plotly.py'
 ```
 
 ### Dependencies

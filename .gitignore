@@ -1,5 +1,7 @@
 archive_web_app/.env
-.DS_Store
 archive_web_app/__pycache__/*.pyc
 archive_web_app/repos.db
+archive_web_app/.pytest_cache
+archive_web_app/tests/__pycache__
 .claude/
+.DS_Store

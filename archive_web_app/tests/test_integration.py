@@ -28,7 +28,7 @@ import sys
 import pandas as pd
 import pytest
 
-
+# Ensuring that the image path is always correct if the working directory is set.
 ARCHIVE_WEB_APP_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
 )
@@ -41,6 +41,7 @@ TEST_ORG = "plotly"
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Generating fake data and repos 
 def _make_sample_df(org=TEST_ORG, n=6):
     """
     Synthetic repos: one already-archived (repo-0, high score),
@@ -74,6 +75,7 @@ def _make_sample_df(org=TEST_ORG, n=6):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
+# Boots the app for the entire test session
 def setup_app(tmp_path_factory):
     """
     Boot the app once against an isolated DB; yield (flask_client, app_module).
@@ -113,10 +115,12 @@ def setup_app(tmp_path_factory):
 # ---------------------------------------------------------------------------
 
 class TestHttpLayer:
+    # Hits / and checks for a 200 status.
     def test_root_returns_200(self, setup_app):
         client, _ = setup_app
         assert client.get("/").status_code == 200
 
+    # Hits the dash endpoint to ensure it provides a valid JSON
     def test_layout_endpoint_returns_valid_json(self, setup_app):
         client, _ = setup_app
         response = client.get("/_dash-layout")
@@ -125,6 +129,7 @@ class TestHttpLayer:
         # Dash serialises components as objects with "type" and/or "props"
         assert "type" in data or "props" in data
 
+    # Hits dash dependencies to ensure it gets 200 for callbacks
     def test_dependencies_endpoint_returns_200(self, setup_app):
         client, _ = setup_app
         assert client.get("/_dash-dependencies").status_code == 200
@@ -135,18 +140,19 @@ class TestHttpLayer:
 # ---------------------------------------------------------------------------
 
 class TestOverviewPage:
+    # Checks that it returns non-null.
     def test_build_overview_returns_component(self, setup_app):
         _, app_module = setup_app
         result = app_module.build_overview(_make_sample_df(), TEST_ORG)
         assert result is not None
-
+    # Checks the that the org name appears as part of the result.
     def test_overview_includes_org_name(self, setup_app):
         _, app_module = setup_app
         result_str = str(
             app_module.build_overview(_make_sample_df(), TEST_ORG)
         )
         assert TEST_ORG in result_str
-
+    # Verifies that the data provided excludes archived repos.
     def test_overview_table_excludes_archived_repos(self, setup_app):
         _, app_module = setup_app
         df = _make_sample_df(n=4)
@@ -164,6 +170,7 @@ class TestOverviewPage:
 # Calibration callout
 # ---------------------------------------------------------------------------
 
+# Testing for proper color coding depending on archival scores
 class TestCalibrationCallout:
     def test_no_archived_repos_shows_secondary(self, setup_app):
         _, app_module = setup_app
@@ -196,10 +203,12 @@ class TestCalibrationCallout:
 # ---------------------------------------------------------------------------
 
 class TestDeepDivePage:
+    # Ensure that it returns something.
     def test_build_deep_dive_returns_component(self, setup_app):
         _, app_module = setup_app
         assert app_module.build_deep_dive(_make_sample_df()) is not None
 
+    # Ensure that the components don't include archived repos.
     def test_dropdown_excludes_archived_repo(self, setup_app):
         _, app_module = setup_app
         df = _make_sample_df(n=5)   # repo-0 is archived
@@ -207,6 +216,7 @@ class TestDeepDivePage:
         assert "repo-0" not in result_str
         assert "repo-1" in result_str
 
+    # Ensure that app is able to pick up when DF is empty/no repos exist.
     def test_empty_df_shows_fallback_message(self, setup_app):
         _, app_module = setup_app
         empty_df = pd.DataFrame(columns=_make_sample_df().columns)
@@ -219,6 +229,7 @@ class TestDeepDivePage:
 # ---------------------------------------------------------------------------
 
 class TestRenderPageCallback:
+    # Ensures that all of the pages that exist returns a compnent
     def test_overview_route(self, setup_app):
         _, app_module = setup_app
         assert app_module.render_page_content("/", TEST_ORG) is not None
@@ -232,7 +243,7 @@ class TestRenderPageCallback:
     def test_about_route(self, setup_app):
         _, app_module = setup_app
         assert app_module.render_page_content("/about", TEST_ORG) is not None
-
+    # The app can fall back gracefully if no exception is raised.
     def test_unknown_org_falls_back_gracefully(self, setup_app):
         _, app_module = setup_app
         # An org with no DB data must not raise — app falls back to startup df

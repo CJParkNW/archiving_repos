@@ -2,8 +2,8 @@
 Tests for calculate_archiving_score() in transform_data.py.
 
 Score breakdown (each condition contributes 0.2, partial conditions 0.1):
-  - No open issues           → +0.2
-  - No open pull requests    → +0.2
+  - No open issues           → +0.2  (issues < 5 → +0.1)
+  - No open pull requests    → +0.2  (PRs < 5 → +0.1)
   - Stars < 5                → +0.2  (stars < 10 → +0.1)
   - Forks < 5                → +0.2  (forks < 10 → +0.1)
   - Last push >= 1 year ago  → +0.2  (>= 6 months → +0.1)
@@ -11,6 +11,8 @@ Max score = 1.0 (strong archive candidate)
 Min score = 0.0 (should not be archived)
 """
 from datetime import datetime, timedelta
+
+import pytest
 
 from transform_data import calculate_archiving_score
 
@@ -89,6 +91,28 @@ class TestPartialScores:
         )
         assert score == 0.9
 
+    def test_few_issues_gives_partial_credit(self):
+        # issues 1-4 → +0.1 (not the full +0.2)
+        score = calculate_archiving_score(
+            num_open_issues=3,
+            num_open_pull_requests=0,
+            star_watcher_count=1,
+            num_forks=1,
+            last_push_time=OLD_PUSH,
+        )
+        assert score == pytest.approx(0.9)
+
+    def test_many_issues_gives_no_credit(self):
+        # issues >= 5 → +0.0
+        score = calculate_archiving_score(
+            num_open_issues=5,
+            num_open_pull_requests=0,
+            star_watcher_count=1,
+            num_forks=1,
+            last_push_time=OLD_PUSH,
+        )
+        assert score == 0.8
+
     def test_open_issues_reduces_score(self):
         score_with_issues = calculate_archiving_score(
             num_open_issues=5,
@@ -105,6 +129,28 @@ class TestPartialScores:
             last_push_time=OLD_PUSH,
         )
         assert score_with_issues < score_without_issues
+
+    def test_few_prs_gives_partial_credit(self):
+        # PRs 1-4 → +0.1 (not the full +0.2)
+        score = calculate_archiving_score(
+            num_open_issues=0,
+            num_open_pull_requests=2,
+            star_watcher_count=1,
+            num_forks=1,
+            last_push_time=OLD_PUSH,
+        )
+        assert score == pytest.approx(0.9)
+
+    def test_many_prs_gives_no_credit(self):
+        # PRs >= 5 → +0.0
+        score = calculate_archiving_score(
+            num_open_issues=0,
+            num_open_pull_requests=5,
+            star_watcher_count=1,
+            num_forks=1,
+            last_push_time=OLD_PUSH,
+        )
+        assert score == 0.8
 
     def test_open_prs_reduces_score(self):
         score_with_prs = calculate_archiving_score(

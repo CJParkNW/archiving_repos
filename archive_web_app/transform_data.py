@@ -79,15 +79,17 @@ def calculate_archiving_score(num_open_issues: int,
     # Ensures that score_metric is set to 0 before calculating
     score_metric = 0
 
-    # Checking to ensure that there are no open issues
+    # Checking open issues — fewer issues makes archiving more acceptable
     if num_open_issues == 0:
-        # If there are no open issues, archiving is acceptable
         score_metric += ACCEPTABLE_STATUS
+    elif num_open_issues < ACCEPTABLE_THRESHOLD:
+        score_metric += MAY_BE_ACCEPTABLE_STATUS
 
-    # Checking to ensure that there are no open pull requests
+    # Checking open pull requests — fewer PRs makes archiving more acceptable
     if num_open_pull_requests == 0:
-        # If there are no open pull requests, archiving is acceptable
         score_metric += ACCEPTABLE_STATUS
+    elif num_open_pull_requests < ACCEPTABLE_THRESHOLD:
+        score_metric += MAY_BE_ACCEPTABLE_STATUS
 
     # Checking to see if there are any stars on the repo
     if star_watcher_count < ACCEPTABLE_THRESHOLD:  # If there are very few stars
