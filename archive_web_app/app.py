@@ -204,8 +204,37 @@ def build_freshness_bar(org: str):
         className="mb-3"
     )
 
-# Ensuring that the archival scores are accurate to what is the scoring
-# criteria in the organization itself.
+def build_calibration_callout(df) -> dbc.Alert:
+    """
+    Compare GitHub's is_archived flag against our calculated scores to surface
+    whether the scoring model agrees with reality.
+
+    Archived repos should have high scores if the model is well-calibrated.
+    Returns a dbc.Alert whose color reflects that agreement:
+      success   → model agrees with ≥50% of already-archived repos
+      danger    → model disagrees with the majority of archived repos
+      secondary → no archived repos present to compare against
+    """
+    AGREEMENT_THRESHOLD = 0.5
+    archived = df[df['is_archived'].astype(bool)]
+    if archived.empty:
+        return dbc.Alert(
+            "No already-archived repos found — calibration unavailable.",
+            color="secondary",
+        )
+    agreement_rate = (archived['overall_score'] >= AGREEMENT_THRESHOLD).mean()
+    if agreement_rate >= 0.5:
+        return dbc.Alert(
+            f"Model agrees with {agreement_rate:.0%} of already-archived repos "
+            f"(score ≥ {AGREEMENT_THRESHOLD}). Scoring appears well-calibrated.",
+            color="success",
+        )
+    return dbc.Alert(
+        f"Model agrees with only {agreement_rate:.0%} of already-archived repos. "
+        "Archived repos have unexpectedly low scores — review scoring criteria.",
+        color="danger",
+    )
+
 
 def build_overview(df, org: str):
     """Build the overview page content from a dataframe."""

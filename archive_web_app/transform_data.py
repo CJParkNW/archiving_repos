@@ -4,20 +4,77 @@ GitHub Rest API regarding each public repository in an organization.
 """
 
 from datetime import datetime
+import logging
+import time
 import requests
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 MAX_TIMEOUT = 100
 # Maximum number of branches to check when scanning for the latest commit.
 # Caps API calls for repos with many branches; 10 is enough to catch recent
 # activity on any actively-developed repo.
 MAX_BRANCHES_TO_CHECK = 10
+# Retry configuration for transient GitHub API failures (429, 5xx, timeouts).
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [5, 15, 30]  # seconds to wait before each retry attempt
+
+
+def _api_get(url: str, headers: dict,
+             params: dict = None) -> requests.Response:
+    """
+    Wrapper around requests.get with retry logic for transient failures.
+
+    Retries on HTTP 429 (rate-limited) and 5xx server errors, as well as
+    network-level Timeout and ConnectionError exceptions. Uses a fixed backoff
+    schedule so a brief GitHub hiccup doesn't fail an entire pipeline run.
+
+    Args:
+        url: The endpoint URL to GET.
+        headers: Request headers (must include the Authorization token).
+        params: Optional query-string parameters.
+
+    Returns:
+        The requests.Response from the last attempt.
+
+    Raises:
+        requests.exceptions.RequestException: If all retries are exhausted on
+            a network-level error.
+    """
+    last_resp = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=headers, params=params,
+                                timeout=MAX_TIMEOUT)
+            if resp.status_code in (429,) or resp.status_code >= 500:
+                if attempt < _MAX_RETRIES:
+                    wait = _RETRY_BACKOFF[attempt]
+                    logger.warning(
+                        "HTTP %s from %s — retrying in %ds (attempt %d/%d)",
+                        resp.status_code, url, wait, attempt + 1, _MAX_RETRIES,
+                    )
+                    time.sleep(wait)
+                    last_resp = resp
+                    continue
+            return resp
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as exc:
+            if attempt < _MAX_RETRIES:
+                wait = _RETRY_BACKOFF[attempt]
+                logger.warning(
+                    "%s for %s — retrying in %ds (attempt %d/%d)",
+                    type(exc).__name__, url, wait, attempt + 1, _MAX_RETRIES,
+                )
+                time.sleep(wait)
+            else:
+                raise
+    return last_resp
 
 
 def get_rate_limit_remaining(headers_input: dict) -> int:
     """Return the number of remaining GitHub API requests for this token."""
-    r = requests.get('https://api.github.com/rate_limit',
-                     headers=headers_input, timeout=MAX_TIMEOUT)
+    r = _api_get('https://api.github.com/rate_limit', headers=headers_input)
     return r.json().get('rate', {}).get('remaining', -1)
 
 
@@ -36,8 +93,8 @@ def read_all_repo_data(
         num_calls: Total number of GitHub API calls made
     """
     # Calling the API endpoint with proper headers/API Key
-    r = requests.get(f'https://api.github.com/orgs/{organization_name}/repos',
-                     headers=headers_input, timeout=MAX_TIMEOUT)
+    r = _api_get(f'https://api.github.com/orgs/{organization_name}/repos',
+                 headers=headers_input)
 
     # Converting HTTP output into readable JSON
     output_file = r.json()
@@ -50,7 +107,7 @@ def read_all_repo_data(
     # Using Pagination, while there are additional pages in the request output,
     # Continue to call until the end to create one complete JSON file
     while 'next' in r.links.keys():
-        r = requests.get(r.links['next']['url'], timeout=MAX_TIMEOUT)
+        r = _api_get(r.links['next']['url'], headers=headers_input)
         output_file.extend(r.json())
         num_calls += 1
         # Source: docs.github.com/en/rest/repos/repos
@@ -197,9 +254,7 @@ def collect_data_on_pull_requests(organization_name: str,
         f"https://api.github.com/repos/{organization_name}"
         f"/{repository_name}/pulls?state=open"
     )
-    pull_request_endpoint = requests.get(
-        pr_url, headers=headers_input, timeout=MAX_TIMEOUT
-    )
+    pull_request_endpoint = _api_get(pr_url, headers=headers_input)
     # Source: docs.github.com/en/rest/pulls/pulls
     # ?apiVersion=2022-11-28#list-pull-requests
     # Outputs information on any open pull requests
@@ -233,11 +288,10 @@ def get_latest_commit_date(organization_name: str,
         f"https://api.github.com/repos/{organization_name}"
         f"/{repository_name}/branches"
     )
-    branches_resp = requests.get(
+    branches_resp = _api_get(
         branches_url,
-        params={'per_page': MAX_BRANCHES_TO_CHECK},
         headers=headers_input,
-        timeout=MAX_TIMEOUT,
+        params={'per_page': MAX_BRANCHES_TO_CHECK},
     )
     branches = branches_resp.json()
     if not isinstance(branches, list) or not branches:
@@ -250,11 +304,10 @@ def get_latest_commit_date(organization_name: str,
     latest_date = None
     num_calls = 1  # branches call
     for branch in branches:
-        resp = requests.get(
+        resp = _api_get(
             commits_base,
-            params={'sha': branch['name'], 'per_page': 1},
             headers=headers_input,
-            timeout=MAX_TIMEOUT,
+            params={'sha': branch['name'], 'per_page': 1},
         )
         num_calls += 1
         commits = resp.json()
@@ -285,16 +338,15 @@ def get_latest_pr_date(organization_name: str,
         f"https://api.github.com/repos/{organization_name}"
         f"/{repository_name}/pulls"
     )
-    resp = requests.get(
+    resp = _api_get(
         pr_url,
+        headers=headers_input,
         params={
             'state': 'all',
             'sort': 'updated',
             'direction': 'desc',
             'per_page': 1,
         },
-        headers=headers_input,
-        timeout=MAX_TIMEOUT,
     )
     # Source: docs.github.com/en/rest/pulls/pulls
     # ?apiVersion=2022-11-28#list-pull-requests
@@ -324,41 +376,49 @@ def create_entire_repo_dataframe(organization_name: str,
 
     # Phase 1: collect raw fields for every repo (no scoring yet).
     # All repos must be fetched first so we can derive org-wide medians.
+    # Failures on individual repos are logged and skipped so a single bad
+    # repo (private, misconfigured, transient error) cannot abort the run.
     rows = []
     for repo in output_file:
-        num_open_pull_requests = collect_data_on_pull_requests(
-            organization_name, repo['name'], headers_input
-        )
-        api_calls += 1
-        latest_commit_time, commit_calls = get_latest_commit_date(
-            organization_name, repo['name'], headers_input
-        )
-        api_calls += commit_calls
-        latest_pr_time = get_latest_pr_date(
-            organization_name, repo['name'], headers_input
-        )
-        api_calls += 1
-        rows.append({
-            'name':                   repo['name'],
-            'id':                     repo['id'],
-            'url':                    repo['html_url'],
-            'description':            repo['description'],
-            'is_fork':                repo['fork'],
-            'num_forks':              repo['forks_count'],
-            'num_star_watchers':      repo['stargazers_count'],
-            # Source: docs.github.com/en/rest/activity/starring
-            # ?apiVersion=2022-11-28#starring-versus-watching
-            'language':               repo['language'],
-            'num_open_issues':        repo['open_issues_count'],
-            'is_archived':            repo['archived'],
-            'last_push_time':         repo['pushed_at'],
-            'created_time':           repo['created_at'],
-            'last_update_time':       repo['updated_at'],
-            # Source: https://github.com/orgs/community/discussions/24442
-            'num_open_pull_requests': num_open_pull_requests,
-            'latest_commit_time':     latest_commit_time,
-            'latest_pr_time':         latest_pr_time,
-        })
+        try:
+            num_open_pull_requests = collect_data_on_pull_requests(
+                organization_name, repo['name'], headers_input
+            )
+            api_calls += 1
+            latest_commit_time, commit_calls = get_latest_commit_date(
+                organization_name, repo['name'], headers_input
+            )
+            api_calls += commit_calls
+            latest_pr_time = get_latest_pr_date(
+                organization_name, repo['name'], headers_input
+            )
+            api_calls += 1
+            rows.append({
+                'name':                   repo['name'],
+                'id':                     repo['id'],
+                'url':                    repo['html_url'],
+                'description':            repo['description'],
+                'is_fork':                repo['fork'],
+                'num_forks':              repo['forks_count'],
+                'num_star_watchers':      repo['stargazers_count'],
+                # Source: docs.github.com/en/rest/activity/starring
+                # ?apiVersion=2022-11-28#starring-versus-watching
+                'language':               repo['language'],
+                'num_open_issues':        repo['open_issues_count'],
+                'is_archived':            repo['archived'],
+                'last_push_time':         repo['pushed_at'],
+                'created_time':           repo['created_at'],
+                'last_update_time':       repo['updated_at'],
+                # Source: https://github.com/orgs/community/discussions/24442
+                'num_open_pull_requests': num_open_pull_requests,
+                'latest_commit_time':     latest_commit_time,
+                'latest_pr_time':         latest_pr_time,
+            })
+        except Exception as exc:
+            logger.warning(
+                "Skipping repo '%s' — error during data collection: %s",
+                repo.get('name', '?'), exc,
+            )
 
     df = pd.DataFrame(rows)
 

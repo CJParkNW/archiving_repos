@@ -28,7 +28,8 @@ import sys
 import pandas as pd
 import pytest
 
-# Ensuring that the image path is always correct if the working directory is set.
+# Ensuring that the image path is always correct if the working directory
+# is set.
 ARCHIVE_WEB_APP_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
 )
@@ -41,7 +42,7 @@ TEST_ORG = "plotly"
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Generating fake data and repos 
+# Generating fake data and repos
 def _make_sample_df(org=TEST_ORG, n=6):
     """
     Synthetic repos: one already-archived (repo-0, high score),
@@ -63,6 +64,7 @@ def _make_sample_df(org=TEST_ORG, n=6):
             "created_time": "2019-01-01T00:00:00Z",
             "last_update_time": "2020-06-01T00:00:00Z",
             "num_open_pull_requests": 0,
+            "latest_commit_time": OLD_PUSH if i < 4 else RECENT_PUSH,
             "overall_score": round(1.0 - i * 0.15, 2),
         }
         for i in range(n)
@@ -145,6 +147,7 @@ class TestOverviewPage:
         _, app_module = setup_app
         result = app_module.build_overview(_make_sample_df(), TEST_ORG)
         assert result is not None
+
     # Checks the that the org name appears as part of the result.
     def test_overview_includes_org_name(self, setup_app):
         _, app_module = setup_app
@@ -152,15 +155,18 @@ class TestOverviewPage:
             app_module.build_overview(_make_sample_df(), TEST_ORG)
         )
         assert TEST_ORG in result_str
+
     # Verifies that the data provided excludes archived repos.
     def test_overview_table_excludes_archived_repos(self, setup_app):
         _, app_module = setup_app
         df = _make_sample_df(n=4)
         overview = app_module.build_overview(df, TEST_ORG)
-        # The DataTable sits at overview.children[5].children[0].children.
+        # The DataTable sits at overview.children[4].children[0].children.
+        # Layout: [0] header row, [1] description, [2] download btn,
+        # [3] spacer, [4] table row, [5] hr, ...
         # Its `data` prop is built from the filtered table_df, so archived
         # repo-0 must be absent and repo-1 must be present.
-        data_table = overview.children[5].children[0].children
+        data_table = overview.children[4].children[0].children
         names = [row["name"] for row in data_table.data]
         assert "repo-0" not in names
         assert "repo-1" in names
@@ -243,6 +249,7 @@ class TestRenderPageCallback:
     def test_about_route(self, setup_app):
         _, app_module = setup_app
         assert app_module.render_page_content("/about", TEST_ORG) is not None
+
     # The app can fall back gracefully if no exception is raised.
     def test_unknown_org_falls_back_gracefully(self, setup_app):
         _, app_module = setup_app
