@@ -27,18 +27,3 @@ The following defaults are set for the UI:
 ORG_NAME = 'plotly'
 REPO_NAME = 'plotly.py'
 ```
-
-### Dependencies
-```
-- Python v.3.13.0
-    - APScheduler v.3.11.2
-    - dash v.3.1.1
-    - dash_bootstrap_components v.2.0.3
-    - datadog v.0.52.1
-    - pandas v.2.3.1
-    - pillow v.11.3.0 
-    - plotly v.6.2.0
-    - pytest v.9.0.3
-    - python-dotenv v.1.1.1
-    - requests v.2.32.4
-```
