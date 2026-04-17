@@ -8,9 +8,9 @@ However, after some time it can become difficult and labor-intensive to actively
 
 ## How to Run this Project
 In order to run and access the visualizations for this project, please ensure the following:
-- Ensure that any modules that need to be installed or updated as listed in the Dependencies is done so.
+- Ensure that you have all of the dependencies needed in the requirements.txt file.
 - Please proceed with [creating an API key](https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api?apiVersion=2022-11-28), and ensure that it has permissions to allow to the REST API endpoints. 
-- If you would like to submit data to Datadog, please also create an API key.
+- (Optional) If you would like to submit data to Datadog, please also create an API key.
 - Create an .env file with the following:
 ```
 # API Key for GitHub REST API
